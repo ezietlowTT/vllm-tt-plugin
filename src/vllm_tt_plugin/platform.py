@@ -715,6 +715,18 @@ def register_tt_models(register_test_models=False) -> None:
     ):
         _register_model_if_missing(ModelRegistry, arch, _gemma4_target)
 
+    # Muse-Glimmer-30B — text-only TT bridge (LM-only serving; mm inputs rejected).
+    # Like Gemma4, Muse's config is nested multimodal, so without the plain HF arch
+    # registered vLLM's resolver falls back to TransformersMultiModalForCausalLM and
+    # crashes on the multimodal _processor_factory assert. Register the plain arch (and
+    # its TT alias) to the text-only TT class (not SupportsMultiModal -> text-only path).
+    _muse_target = "models.demos.muse_glimmer.tt.generator_vllm:MuseGlimmerForConditionalGeneration"
+    for arch in (
+        "MuseGlimmerForConditionalGeneration",
+        "TTMuseGlimmerForConditionalGeneration",
+    ):
+        _register_model_if_missing(ModelRegistry, arch, _muse_target)
+
     # DeepseekV3
     _register_model_if_missing(
         ModelRegistry,
