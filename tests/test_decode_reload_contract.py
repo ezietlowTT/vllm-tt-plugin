@@ -560,6 +560,7 @@ def test_contract_v0_keeps_legacy_call_shape_and_warns_once(monkeypatch):
             trace_mode="decode_only",
             kv_caches=object(),
             request_specific_rope=False,
+            async_decode_scheduling=True,
         )
     )
     controller = TTAsyncDecodeController(runner)
@@ -576,6 +577,47 @@ def test_contract_v0_keeps_legacy_call_shape_and_warns_once(monkeypatch):
     # standalone plugin and therefore remains unchanged for version 0.
     assert all(call["slot_remap"].tolist() == [0] for call in calls)
     assert len(warnings) == 1
+
+
+def test_contract_v0_sync_mode_is_informational_once(monkeypatch):
+    calls = []
+    warnings = []
+    infos = []
+    monkeypatch.setattr(
+        "vllm_tt_plugin.async_decode.logger.warning",
+        lambda *args: warnings.append(args),
+    )
+    monkeypatch.setattr(
+        "vllm_tt_plugin.async_decode.logger.info",
+        lambda *args: infos.append(args),
+    )
+
+    class Model:
+        model_capabilities = {"supports_async_decode": False}
+
+        def decode_forward(self, **kwargs):
+            calls.append(kwargs)
+            return torch.zeros((1, 1))
+
+    runner = _accepted_decode_hooks(
+        SimpleNamespace(
+            model=Model(),
+            trace_mode="decode_only",
+            kv_caches=object(),
+            request_specific_rope=False,
+            async_decode_scheduling=False,
+        )
+    )
+    controller = TTAsyncDecodeController(runner)
+    model_input = _submission_input()
+
+    controller.submit_decode(model_input, read_from_device=True)
+    controller.submit_decode(model_input, read_from_device=True)
+
+    assert len(calls) == 2
+    assert not warnings
+    assert len(infos) == 1
+    assert "synchronous scheduling" in infos[0][0]
 
 
 def _completed_step(token: int, runner_output=None) -> CompletedDecodeStep:

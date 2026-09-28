@@ -835,13 +835,20 @@ class TTAsyncDecodeController:
             kwargs["reset_batch"] = model_input.decode_layout_changed
         if contract_version < 1 and not self._legacy_contract_warning_emitted:
             self._legacy_contract_warning_emitted = True
-            logger.warning(
-                "TT model %s does not advertise decode_input_update_contract "
-                ">= 1; preserving its legacy reset_batch reload behavior. "
-                "Async decode correctness is not guaranteed until the model "
-                "adapter implements the explicit contract.",
-                type(runner.model).__name__,
-            )
+            if getattr(runner, "async_decode_scheduling", False):
+                logger.warning(
+                    "TT model %s does not advertise decode_input_update_contract "
+                    ">= 1; preserving its legacy reset_batch reload behavior. "
+                    "Async decode correctness is not guaranteed until the model "
+                    "adapter implements the explicit contract.",
+                    type(runner.model).__name__,
+                )
+            else:
+                logger.info(
+                    "TT model %s uses the legacy decode input reload contract "
+                    "under synchronous scheduling; async overlap is disabled.",
+                    type(runner.model).__name__,
+                )
 
         enc_dec_kwargs: dict[str, Any] = {}
         if runner.request_specific_rope:
