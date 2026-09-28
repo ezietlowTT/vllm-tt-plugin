@@ -353,6 +353,7 @@ def test_submit_prefill_forwards_plan_empty_slots_to_model():
         multi_modal_kwargs={},
         perform_device_sampling=False,
         prefill_empty_slots=[4],
+        request_execution_lanes=["plain"],
     )
 
     # Multi-lane batch (len > 1) so the empty-slots path is exercised; the
@@ -360,6 +361,19 @@ def test_submit_prefill_forwards_plan_empty_slots_to_model():
     TTModelRunner.submit_prefill(runner, model_input, [2, 2])
 
     assert captured["empty_slots"] == [4]
+    assert captured["request_execution_lanes"] == ["plain"]
+
+
+def test_plain_fallback_always_uses_reference_host_sampler():
+    """Plain-lane semantics must not depend on partial TT sampler parity."""
+    runner = object.__new__(TTModelRunner)
+    runner.sample_on_device_mode = "decode_only"
+
+    assert not runner.check_perform_device_sampling(
+        is_decode=True,
+        has_structured_outputs=False,
+        execution_lane="plain",
+    )
 
 
 def _sampling_params(rows=2):

@@ -33,9 +33,13 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_tt_plugin.config import (
+    store_tt_adaptive_block_batched,
     store_tt_adaptive_block_output,
+    store_tt_adaptive_block_ragged,
     store_tt_block_kv_extent_tokens,
+    store_tt_block_output_multimodal,
     store_tt_output_tokens_per_step,
+    store_tt_plain_fallback,
 )
 from vllm_tt_plugin.input_batch import InputBatch
 from vllm_tt_plugin.model_runner import TTModelRunner
@@ -43,6 +47,7 @@ from vllm_tt_plugin.scheduler import (
     TTScheduler,
     get_tt_block_step_decisions,
     get_tt_forced_reset_discard_counts,
+    get_tt_request_execution_lanes,
 )
 
 BLOCK_SIZE = 128
@@ -91,6 +96,10 @@ def _scheduler(
     adaptive: bool = False,
     max_num_seqs: int = 1,
     kv_extent: int = 0,
+    batched: bool = False,
+    ragged: bool = False,
+    multimodal: bool = False,
+    plain_fallback: bool = False,
 ) -> TTScheduler:
     model_config = ModelConfig(
         model=str(LOCAL_MODEL_CONFIG),
@@ -134,6 +143,14 @@ def _scheduler(
     store_tt_output_tokens_per_step(config, output_width)
     if adaptive:
         store_tt_adaptive_block_output(config, True)
+    if batched:
+        store_tt_adaptive_block_batched(config, True)
+    if ragged:
+        store_tt_adaptive_block_ragged(config, True)
+    if multimodal:
+        store_tt_block_output_multimodal(config, True)
+    if plain_fallback:
+        store_tt_plain_fallback(config, True)
     if kv_extent:
         store_tt_block_kv_extent_tokens(config, kv_extent)
     num_blocks = max_model_len // BLOCK_SIZE + 2
@@ -502,6 +519,26 @@ def test_multimodal_features_are_dropped_from_bypassed_request():
 
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
     assert scheduler.running == []
+
+
+def test_multimodal_capability_preserves_request_features():
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+
+    scheduler = _scheduler(adaptive=True, multimodal=True)
+    request = _request(max_tokens=3)
+    request.mm_features = [
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img-0",
+            mm_position=PlaceholderRange(offset=0, length=16),
+        )
+    ]
+
+    scheduler.add_request(request)
+
+    assert len(request.mm_features) == 1
+    assert request.has_encoder_inputs
 
 
 @pytest.mark.parametrize(
@@ -1228,6 +1265,58 @@ def test_adaptive_aborted_owner_does_not_hand_its_session_to_a_peer():
     assert len(resumed.num_scheduled_tokens) == 1
     assert get_tt_block_step_decisions(resumed)["req-a"] is False
     assert req_a.num_output_placeholders == 1
+
+
+def test_plain_fallback_alternates_homogeneous_decode_lanes():
+    from vllm_tt_plugin.scheduler import get_tt_execution_lane
+
+    scheduler = _scheduler(
+        adaptive=True,
+        batched=True,
+        ragged=True,
+        max_num_seqs=2,
+        plain_fallback=True,
+    )
+    dflash = _request(CANVAS * 4, request_id="dflash")
+    plain = _request(CANVAS * 4, request_id="plain")
+    dflash.sampling_params.temperature = 0.0
+    plain.sampling_params.temperature = 0.7
+    scheduler.add_request(dflash)
+    scheduler.add_request(plain)
+
+    prefill = scheduler.schedule()
+    assert get_tt_execution_lane(prefill) == "prefill"
+    assert get_tt_request_execution_lanes(prefill) == {
+        "dflash": "dflash",
+        "plain": "plain",
+    }
+    scheduler.update_from_output(
+        prefill,
+        ModelRunnerOutput(
+            req_ids=["dflash", "plain"],
+            req_id_to_index={"dflash": 0, "plain": 1},
+            sampled_token_ids=[[5], [6]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    first = scheduler.schedule()
+    assert get_tt_execution_lane(first) == "dflash"
+    assert list(first.num_scheduled_tokens) == ["dflash"]
+    assert get_tt_block_step_decisions(first)["dflash"] is True
+    scheduler.update_from_output(first, _runner_output(first, list(range(CANVAS))))
+
+    second = scheduler.schedule()
+    assert get_tt_execution_lane(second) == "plain"
+    assert list(second.num_scheduled_tokens) == ["plain"]
+    assert get_tt_block_step_decisions(second)["plain"] is False
+    scheduler.update_from_output(second, _runner_output(second, [9]))
+
+    third = scheduler.schedule()
+    assert get_tt_execution_lane(third) == "dflash"
+    assert list(third.num_scheduled_tokens) == ["dflash"]
 
 
 def test_adaptive_commit_without_scheduling_decision_raises():

@@ -175,3 +175,11 @@ class TTModelInput:
     # must resolve rows through this. ``None`` for lane builds, whose rows are
     # the persistent slots.
     row_req_ids: list[str] | None = None
+
+    # Homogeneous execution contract chosen by TTScheduler for this step.
+    # Prefill may contain both request classes; decode is "dflash" or "plain".
+    execution_lane: str = "prefill"
+
+    # Admission-pinned lane for each prefill row, in forward-row order. Decode
+    # uses the homogeneous scalar ``execution_lane`` above and leaves this None.
+    request_execution_lanes: list[str] | None = None

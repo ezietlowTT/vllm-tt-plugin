@@ -28,6 +28,7 @@ from vllm_tt_plugin.model_input import (
     TTSamplingParams,
     slice_tt_sampling_params,
 )
+from vllm_tt_plugin.scheduler import get_tt_execution_lane
 from vllm_tt_plugin.structured_output import (
     has_structured_outputs,
     reorder_grammar_bitmask_for_tt_batch,
@@ -1206,6 +1207,7 @@ class TTLaneInputBatch(InputBatch):
             is_decode=True,
             has_structured_outputs=has_structured,
             sampling_rows=occupied,
+            execution_lane=get_tt_execution_lane(scheduler_output),
         )
 
         # The prompt/output token tensors feed device-side penalties only. Host
@@ -1299,6 +1301,7 @@ class TTLaneInputBatch(InputBatch):
             is_decode=False,
             has_structured_outputs=has_structured,
             sampling_rows=rows,
+            execution_lane=get_tt_execution_lane(scheduler_output),
         )
         if intermediate_prefill_mask.any():
             # Device sampling advances device RNG state for every row it reads,

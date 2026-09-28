@@ -14,18 +14,26 @@ from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from vllm_tt_plugin.config import (
+    TT_EXECUTION_LANE_DFLASH,
+    classify_tt_execution_lane,
     get_tt_config,
     get_tt_data_parallel_size,
     get_tt_decode_interleave_config,
     get_tt_output_tokens_per_step,
+    has_tt_plain_fallback,
     is_tt_adaptive_block_output_model,
     is_tt_block_output_model,
+    is_tt_block_output_multimodal,
     require_tt_output_tokens_per_step,
+    store_tt_adaptive_block_batched,
     store_tt_adaptive_block_max_prompt_tokens,
     store_tt_adaptive_block_output,
+    store_tt_adaptive_block_ragged,
     store_tt_block_kv_extent_tokens,
+    store_tt_block_output_multimodal,
     store_tt_lane_count,
     store_tt_output_tokens_per_step,
+    store_tt_plain_fallback,
     uses_tt_lane_coordinator,
     validate_tt_lane_config,
 )
@@ -760,29 +768,37 @@ def _pin_v1_model_runner() -> None:
     os.environ[_V2_MODEL_RUNNER_ENV] = "0"
 
 
-def _neutralize_model_owned_sampling(params) -> list[str]:
+def _neutralize_model_owned_sampling(
+    params, keep_transport_controls: bool = False
+) -> list[str]:
     """Reset HTTP sampling controls on the cloned per-request SamplingParams.
 
     The model owns its Gumbel sampler and temperature schedule, but common
     OpenAI clients still send transport sampling controls, so they are
     accepted and ignored. Returns the neutralized fields for logging.
+
+    ``keep_transport_controls`` is used by adaptive block-output models. Their
+    width-one prefill/plain steps still run through vLLM's sampler, so
+    temperature, top-p, top-k, and seed must remain request-owned. Controls
+    that force host processing on a block step remain neutralized.
     """
     ignored = []
-    if params.temperature != 1.0:
-        ignored.append(f"temperature={params.temperature!r}")
-        params.temperature = 1.0
-    if params.top_p != 1.0:
-        ignored.append(f"top_p={params.top_p!r}")
-        params.top_p = 1.0
-    if params.top_k not in (0, -1):
-        ignored.append(f"top_k={params.top_k!r}")
-        params.top_k = 0
+    if not keep_transport_controls:
+        if params.temperature != 1.0:
+            ignored.append(f"temperature={params.temperature!r}")
+            params.temperature = 1.0
+        if params.top_p != 1.0:
+            ignored.append(f"top_p={params.top_p!r}")
+            params.top_p = 1.0
+        if params.top_k not in (0, -1):
+            ignored.append(f"top_k={params.top_k!r}")
+            params.top_k = 0
+        if params.seed is not None:
+            ignored.append(f"seed={params.seed!r}")
+            params.seed = None
     if params.min_p != 0.0:
         ignored.append(f"min_p={params.min_p!r}")
         params.min_p = 0.0
-    if params.seed is not None:
-        ignored.append(f"seed={params.seed!r}")
-        params.seed = None
     if params.presence_penalty != 0.0:
         ignored.append(f"presence_penalty={params.presence_penalty!r}")
         params.presence_penalty = 0.0
@@ -835,7 +851,16 @@ def _install_block_output_input_processor_patch() -> None:
         if not is_block_output_model or cloned_params is None:
             return request
 
-        ignored = _neutralize_model_owned_sampling(cloned_params)
+        plain_fallback = has_tt_plain_fallback(self.vllm_config)
+        execution_lane, _ = classify_tt_execution_lane(cloned_params)
+        ignored = []
+        if not plain_fallback or execution_lane == TT_EXECUTION_LANE_DFLASH:
+            ignored = _neutralize_model_owned_sampling(
+                cloned_params,
+                keep_transport_controls=is_tt_adaptive_block_output_model(
+                    self.vllm_config
+                ),
+            )
         if ignored:
             logger.warning_once(
                 "This block-output model uses its model-owned sampler; HTTP "
@@ -846,7 +871,9 @@ def _install_block_output_input_processor_patch() -> None:
                 "; ".join(ignored),
             )
 
-        if unresolved_max_tokens:
+        if unresolved_max_tokens and (
+            not plain_fallback or execution_lane == TT_EXECUTION_LANE_DFLASH
+        ):
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 request.prompt_token_ids, request.prompt_embeds
             )
@@ -1427,9 +1454,7 @@ class TTPlatform(Platform):
     @classmethod
     def _resolve_output_tokens_per_step(cls, model_class: type) -> int:
         """Validate and return a model's committed output-width capability."""
-        model_capabilities: dict | None = getattr(
-            model_class, "model_capabilities", None
-        )
+        model_capabilities = cls._resolve_model_capabilities(model_class)
         output_tokens_per_step = (
             model_capabilities.get("output_tokens_per_step", 1)
             if model_capabilities
@@ -1446,6 +1471,29 @@ class TTPlatform(Platform):
                 "expected an integer >= 1"
             )
         return output_tokens_per_step
+
+    @staticmethod
+    def _resolve_model_capabilities(model_class: type) -> dict | None:
+        """Return startup capabilities, including profile-dependent values.
+
+        A class-level dict remains the normal contract. The paired
+        ``get_model_capabilities`` escape hatch supports models whose output
+        transport is selected by the launch profile. It is called once while
+        the platform builds the engine, avoiding import-order-stale globals.
+        """
+        resolver = getattr(model_class, "get_model_capabilities", None)
+        capabilities = (
+            resolver()
+            if callable(resolver)
+            else getattr(model_class, "model_capabilities", None)
+        )
+        if capabilities is not None and not isinstance(capabilities, dict):
+            raise TypeError(
+                f"{model_class.__module__}.{model_class.__name__} capabilities "
+                "must be a dict or None, "
+                f"got {type(capabilities).__name__}"
+            )
+        return capabilities
 
     @classmethod
     def _get_block_output_contract(cls) -> tuple[int, int] | None:
@@ -1677,9 +1725,7 @@ class TTPlatform(Platform):
         model_class, _ = get_model_architecture(vllm_config.model_config)
 
         # Get model capabilities from the class
-        model_capabilities: dict | None = getattr(
-            model_class, "model_capabilities", None
-        )
+        model_capabilities = cls._resolve_model_capabilities(model_class)
 
         # Rewrites scheduler_config; nothing between here and the closing
         # ``verify_max_model_len`` reads the fields it touches.
@@ -1709,6 +1755,46 @@ class TTPlatform(Platform):
                 "tt_adaptive_block_output requires output_tokens_per_step > 1"
             )
         store_tt_adaptive_block_output(vllm_config, adaptive_block_output)
+        # Batched adaptive blocks: the model speculates for EVERY decoding
+        # request in one step (a multi-user verify), so every decode step is a
+        # block step for all of them. Only meaningful on top of the adaptive
+        # contract (prefill anchors stay width-1 host-sampled tokens).
+        adaptive_block_batched = bool(
+            (model_capabilities or {}).get("tt_adaptive_block_batched", False)
+        )
+        if adaptive_block_batched and not adaptive_block_output:
+            raise ValueError(
+                "tt_adaptive_block_batched requires tt_adaptive_block_output"
+            )
+        store_tt_adaptive_block_batched(vllm_config, adaptive_block_batched)
+        # Ragged batched blocks: each request of a decode step commits its own
+        # 1..W tokens (a rectangular [num_reqs, W] tensor with -1 padding)
+        # instead of being held for a full block. Only meaningful on top of the
+        # batched contract, whose per-step W reservation it keeps.
+        adaptive_block_ragged = bool(
+            (model_capabilities or {}).get("tt_adaptive_block_ragged", False)
+        )
+        if adaptive_block_ragged and not adaptive_block_batched:
+            raise ValueError(
+                "tt_adaptive_block_ragged requires tt_adaptive_block_batched"
+            )
+        store_tt_adaptive_block_ragged(vllm_config, adaptive_block_ragged)
+
+        block_output_multimodal = bool(
+            (model_capabilities or {}).get("tt_block_output_multimodal", False)
+        )
+        if block_output_multimodal and not adaptive_block_output:
+            raise ValueError(
+                "tt_block_output_multimodal requires tt_adaptive_block_output"
+            )
+        store_tt_block_output_multimodal(vllm_config, block_output_multimodal)
+
+        plain_fallback = bool(
+            (model_capabilities or {}).get("tt_plain_fallback", False)
+        )
+        if plain_fallback and not adaptive_block_output:
+            raise ValueError("tt_plain_fallback requires tt_adaptive_block_output")
+        store_tt_plain_fallback(vllm_config, plain_fallback)
         # Optional prompt-length frontier for the adaptive block path: prompts
         # above it are served as plain baseline by the model, so the scheduler
         # must reserve width-1 for them (see TTScheduler). 0 = no limit.
@@ -2186,40 +2272,63 @@ class TTPlatform(Platform):
         if not isinstance(params, SamplingParams) or block_contract is None:
             return
 
+        # A block model is text-only unless it explicitly declares that it
+        # consumes multimodal features. Reject here rather than silently
+        # dropping an image before model prefill.
+        vllm_config = cls._resolve_tt_admission_handle()
+        if (
+            vllm_config is not None
+            and is_tt_adaptive_block_output_model(vllm_config)
+            and not is_tt_block_output_multimodal(vllm_config)
+            and (
+                processed_inputs.get("mm_kwargs")
+                or processed_inputs.get("mm_placeholders")
+            )
+        ):
+            raise ValueError(
+                "This speculative (adaptive block-output) profile serves text "
+                "prompts only; multimodal prompts need the plain-decode profile"
+            )
         output_size, max_model_len = block_contract
+        plain_fallback = (
+            has_tt_plain_fallback(vllm_config) if vllm_config is not None else False
+        )
+        execution_lane, _ = classify_tt_execution_lane(params)
         prompt_len = length_from_prompt_token_ids_or_embeds(
             processed_inputs.get("prompt_token_ids"),
             processed_inputs.get("prompt_embeds"),
         )
-        cls._resolve_block_output_max_tokens(
-            prompt_len,
-            params.max_tokens,
-            output_size,
-            max_model_len,
-        )
+        if not plain_fallback or execution_lane == TT_EXECUTION_LANE_DFLASH:
+            cls._resolve_block_output_max_tokens(
+                prompt_len,
+                params.max_tokens,
+                output_size,
+                max_model_len,
+            )
 
         # Reject unsupported response-contract controls. Model-owned sampling
         # controls (temperature etc.) are instead accepted and neutralized on
         # the per-request clone in _install_block_output_input_processor_patch.
         unsupported = []
-        if params.n != 1:
-            unsupported.append(f"n={params.n!r} (accepted: 1)")
-        if params.logprobs is not None:
-            unsupported.append(f"logprobs={params.logprobs!r} (accepted: None)")
-        if params.logprob_token_ids is not None:
-            unsupported.append("logprob_token_ids (accepted: omitted/None)")
-        if params.flat_logprobs:
-            unsupported.append("flat_logprobs=True (accepted: False)")
-        if params.bad_words:
-            unsupported.append("bad_words (accepted: omitted/empty)")
-        if params.structured_outputs is not None:
-            unsupported.append("structured_outputs (accepted: omitted/None)")
-        if params.logit_bias is not None:
-            unsupported.append("logit_bias (accepted: omitted/None)")
-        if params.allowed_token_ids is not None:
-            unsupported.append("allowed_token_ids (accepted: omitted/None)")
-        if params.min_tokens != 0:
-            unsupported.append(f"min_tokens={params.min_tokens!r} (accepted: 0)")
+        if not plain_fallback:
+            if params.n != 1:
+                unsupported.append(f"n={params.n!r} (accepted: 1)")
+            if params.logprobs is not None:
+                unsupported.append(f"logprobs={params.logprobs!r} (accepted: None)")
+            if params.logprob_token_ids is not None:
+                unsupported.append("logprob_token_ids (accepted: omitted/None)")
+            if params.flat_logprobs:
+                unsupported.append("flat_logprobs=True (accepted: False)")
+            if params.bad_words:
+                unsupported.append("bad_words (accepted: omitted/empty)")
+            if params.structured_outputs is not None:
+                unsupported.append("structured_outputs (accepted: omitted/None)")
+            if params.logit_bias is not None:
+                unsupported.append("logit_bias (accepted: omitted/None)")
+            if params.allowed_token_ids is not None:
+                unsupported.append("allowed_token_ids (accepted: omitted/None)")
+            if params.min_tokens != 0:
+                unsupported.append(f"min_tokens={params.min_tokens!r} (accepted: 0)")
         if params.thinking_token_budget is not None:
             unsupported.append("thinking_token_budget (accepted: omitted/None)")
         if params.repetition_detection is not None:

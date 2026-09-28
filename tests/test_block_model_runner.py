@@ -333,6 +333,7 @@ def _extract(
         intermediate_prefill_mask=None,
         max_num_logprobs=[None],
         grammar_bitmask=[None],
+        execution_lane="dflash",
     )
     return TTModelRunner._get_output_tokens(
         runner,

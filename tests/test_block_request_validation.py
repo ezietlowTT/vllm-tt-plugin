@@ -14,7 +14,10 @@ from vllm.sampling_params import (
 
 from vllm_tt_plugin.config import (
     get_tt_output_tokens_per_step,
+    has_tt_plain_fallback,
+    store_tt_adaptive_block_output,
     store_tt_output_tokens_per_step,
+    store_tt_plain_fallback,
 )
 from vllm_tt_plugin.platform import (
     TTPlatform,
@@ -156,6 +159,42 @@ def test_sampling_controls_are_accepted_by_validation():
     _validate(SamplingParams(max_tokens=16, temperature=0.5, seed=42))
 
 
+def test_plain_fallback_preserves_sampling_semantics_and_default_limit(monkeypatch):
+    processor_cls, processor = _processor_harness(
+        monkeypatch, output_size=256, max_model_len=1024
+    )
+    store_tt_adaptive_block_output(processor.vllm_config, True)
+    store_tt_plain_fallback(processor.vllm_config, True)
+    params = SamplingParams(max_tokens=None, temperature=0.7, seed=42)
+
+    request = processor_cls.process_inputs(
+        processor,
+        "plain-sampling",
+        {"prompt_token_ids": [1] * 200},
+        params,
+    )
+
+    assert request.sampling_params.temperature == 0.7
+    assert request.sampling_params.seed == 42
+    assert request.sampling_params.max_tokens == 824
+    assert params.max_tokens is None
+
+
+def test_plain_fallback_admits_supported_response_controls(monkeypatch):
+    config = _set_platform_contract(monkeypatch)
+    store_tt_adaptive_block_output(config, True)
+    store_tt_plain_fallback(config, True)
+
+    _validate(SamplingParams(max_tokens=16, logprobs=0))
+    _validate(SamplingParams(max_tokens=16, allowed_token_ids=[2, 3]))
+    _validate(
+        SamplingParams(
+            max_tokens=16,
+            structured_outputs=StructuredOutputsParams(json_object=True),
+        )
+    )
+
+
 @pytest.mark.parametrize(
     ("kwargs", "field"),
     [
@@ -286,6 +325,29 @@ class ARModel:
         "supports_async_decode": False,
         "supports_prefix_caching": False,
     }
+
+
+class PlainFallbackBlockModel(BlockModel):
+    model_capabilities = {
+        **BlockModel.model_capabilities,
+        "tt_adaptive_block_output": True,
+        "tt_adaptive_block_batched": True,
+        "tt_adaptive_block_ragged": True,
+        "tt_plain_fallback": True,
+    }
+
+    @staticmethod
+    def note_state_slots_moved(_moves):
+        pass
+
+
+def test_startup_stores_plain_fallback_capability(monkeypatch):
+    config = _config(max_num_seqs=4)
+    _patch_model_resolution(monkeypatch, PlainFallbackBlockModel)
+
+    TTPlatform.check_and_update_config(config)
+
+    assert has_tt_plain_fallback(config) is True
 
 
 class _WeakrefableConfig(SimpleNamespace):
@@ -977,3 +1039,63 @@ def test_startup_rejects_top_k_host_fallback_for_block_output(monkeypatch):
     _patch_model_resolution(monkeypatch, BoundedBlockModel)
     with pytest.raises(ValueError, match="max_device_top_k.*block-output"):
         TTPlatform.check_and_update_config(_config())
+
+
+def test_input_processor_keeps_transport_controls_for_adaptive_block_model(
+    monkeypatch,
+):
+    """An adaptive block model's prefill anchor is sampled by vLLM's sampler:
+    temperature/top_p/top_k/seed must survive, min_p and penalties must not."""
+    from vllm_tt_plugin.platform import _neutralize_model_owned_sampling
+
+    params = SamplingParams(
+        max_tokens=16,
+        temperature=0.7,
+        top_p=0.9,
+        top_k=5,
+        seed=7,
+        min_p=0.1,
+        repetition_penalty=1.2,
+    )
+    ignored = _neutralize_model_owned_sampling(params, keep_transport_controls=True)
+    assert params.temperature == 0.7 and params.top_p == 0.9
+    assert params.top_k == 5 and params.seed == 7
+    assert params.min_p == 0.0 and params.repetition_penalty == 1.0
+    assert any(x.startswith("min_p") for x in ignored)
+    assert not any(x.startswith("temperature") for x in ignored)
+
+    greedy = SamplingParams(max_tokens=16, temperature=0.0)
+    _neutralize_model_owned_sampling(greedy, keep_transport_controls=True)
+    assert greedy.temperature == 0.0  # a greedy request stays greedy
+
+    plain = SamplingParams(max_tokens=16, temperature=0.0)
+    _neutralize_model_owned_sampling(plain)
+    assert plain.temperature == 1.0  # non-adaptive block models: model-owned sampler
+
+
+def test_adaptive_block_model_rejects_multimodal_prompt_unless_capable(monkeypatch):
+    from vllm_tt_plugin.config import (
+        store_tt_adaptive_block_output,
+        store_tt_block_output_multimodal,
+    )
+
+    config = TTPlatform._resolve_tt_admission_handle()
+    assert config is not None
+    store_tt_adaptive_block_output(config, True)
+    try:
+        prompt = {
+            "prompt_token_ids": [1] * 32,
+            "mm_kwargs": [object()],
+            "mm_placeholders": {"image": [object()]},
+        }
+        with pytest.raises(ValueError, match="text prompts only"):
+            TTPlatform.validate_request(prompt, SamplingParams(max_tokens=16))
+        store_tt_block_output_multimodal(config, True)
+        TTPlatform.validate_request(prompt, SamplingParams(max_tokens=16))
+        # text prompt still fine
+        TTPlatform.validate_request(
+            {"prompt_token_ids": [1] * 32}, SamplingParams(max_tokens=16)
+        )
+    finally:
+        store_tt_block_output_multimodal(config, False)
+        store_tt_adaptive_block_output(config, False)

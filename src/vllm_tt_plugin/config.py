@@ -147,6 +147,153 @@ def store_tt_adaptive_block_output(vllm_config: "VllmConfig", flag: bool) -> Non
 # Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
 _ADAPTIVE_BLOCK_MAX_PROMPT_KEY = "_tt_adaptive_block_max_prompt_tokens"
 
+_ADAPTIVE_BLOCK_BATCHED_KEY = "tt_adaptive_block_batched"
+
+
+def is_tt_adaptive_block_batched(vllm_config: "VllmConfig") -> bool:
+    """Whether an adaptive block model commits its block on BATCHED decode steps too.
+
+    A plain adaptive block model blocks only when it decodes alone. A model that
+    runs its speculative session for every decoding request at once (one
+    multi-user verify per step) declares this flag: every decode step is a block
+    step for all of its requests, each committing exactly
+    ``output_tokens_per_step`` tokens (EOS-filled at a stop). Prefill steps still
+    commit one host-sampled anchor per request. The scheduler reserves the block
+    placeholders for every request of a decode step, so a step that mixes
+    prefill and decode requests is rejected -- TTScheduler's default mode never
+    builds one.
+    """
+    additional = getattr(vllm_config, "additional_config", None) or {}
+    return bool(additional.get(_ADAPTIVE_BLOCK_BATCHED_KEY, False))
+
+
+def store_tt_adaptive_block_batched(vllm_config: "VllmConfig", flag: bool) -> None:
+    additional = getattr(vllm_config, "additional_config", None)
+    if not isinstance(additional, dict):
+        additional = {}
+        vllm_config.additional_config = additional
+    additional[_ADAPTIVE_BLOCK_BATCHED_KEY] = bool(flag)
+
+
+_ADAPTIVE_BLOCK_RAGGED_KEY = "tt_adaptive_block_ragged"
+
+# Row padding of a ragged block: every row of the rectangular
+# ``[num_reqs, output_tokens_per_step]`` step output carries ``1..W`` real
+# token ids followed by this value. Token ids are never negative.
+TT_RAGGED_BLOCK_PAD_TOKEN_ID = -1
+
+
+def is_tt_adaptive_block_ragged(vllm_config: "VllmConfig") -> bool:
+    """Whether a batched adaptive block model commits RAGGED per-request widths.
+
+    Under ``tt_adaptive_block_batched`` every request of a decode step commits
+    exactly ``W = output_tokens_per_step`` tokens, so a slot that stops early
+    is held until every slot has a full block. A model that declares this flag
+    delivers each request's tokens as produced instead: a decode-only block
+    step still returns one rectangular int32 ``[num_reqs, W]`` tensor, but row
+    ``i`` holds ``1 <= n_i <= W`` real token ids followed by
+    ``TT_RAGGED_BLOCK_PAD_TOKEN_ID`` padding. The runner counts ``n_i`` as the
+    non-negative ids of the row, strips the padding and appends only those
+    ``n_i`` tokens; the scheduler accepts ``1 <= n_i <= W`` per request but
+    still consumes the whole ``W`` placeholder reservation, so the request's
+    computed tokens advance by ``n_i`` while the per-step reservation (and the
+    KV lookahead) stays ``W``. Prefill anchors stay width-1. Requires
+    ``tt_adaptive_block_batched``.
+    """
+    additional = getattr(vllm_config, "additional_config", None) or {}
+    return bool(additional.get(_ADAPTIVE_BLOCK_RAGGED_KEY, False))
+
+
+def store_tt_adaptive_block_ragged(vllm_config: "VllmConfig", flag: bool) -> None:
+    additional = getattr(vllm_config, "additional_config", None)
+    if not isinstance(additional, dict):
+        additional = {}
+        vllm_config.additional_config = additional
+    additional[_ADAPTIVE_BLOCK_RAGGED_KEY] = bool(flag)
+
+
+_BLOCK_OUTPUT_MULTIMODAL_KEY = "tt_block_output_multimodal"
+
+
+def is_tt_block_output_multimodal(vllm_config: "VllmConfig") -> bool:
+    """Whether a block-output model preserves and consumes multimodal inputs.
+
+    Block output historically implied text-only serving in the TT scheduler,
+    which dropped encoder features from bypassed requests to avoid a permanent
+    zero-budget stall. Vision-capable block models opt in explicitly so the
+    scheduler preserves their request-local image features through prefill.
+    """
+    additional = getattr(vllm_config, "additional_config", None) or {}
+    return bool(additional.get(_BLOCK_OUTPUT_MULTIMODAL_KEY, False))
+
+
+def store_tt_block_output_multimodal(vllm_config: "VllmConfig", flag: bool) -> None:
+    additional = getattr(vllm_config, "additional_config", None)
+    if not isinstance(additional, dict):
+        additional = {}
+        vllm_config.additional_config = additional
+    additional[_BLOCK_OUTPUT_MULTIMODAL_KEY] = bool(flag)
+
+
+_PLAIN_FALLBACK_KEY = "tt_plain_fallback"
+TT_EXECUTION_LANE_DFLASH = "dflash"
+TT_EXECUTION_LANE_PLAIN = "plain"
+
+
+def has_tt_plain_fallback(vllm_config: "VllmConfig") -> bool:
+    """Whether requests incompatible with block output use ordinary TT decode."""
+    additional = getattr(vllm_config, "additional_config", None) or {}
+    return bool(additional.get(_PLAIN_FALLBACK_KEY, False))
+
+
+def store_tt_plain_fallback(vllm_config: "VllmConfig", flag: bool) -> None:
+    additional = getattr(vllm_config, "additional_config", None)
+    if not isinstance(additional, dict):
+        additional = {}
+        vllm_config.additional_config = additional
+    additional[_PLAIN_FALLBACK_KEY] = bool(flag)
+
+
+def classify_tt_execution_lane(params: Any) -> tuple[str, str]:
+    """Classify one request for lossless DFlash or ordinary TT decode.
+
+    DFlash is a greedy, one-choice execution contract. Any response semantic
+    that needs host logits, per-token probabilities, grammar masking, seeded
+    sampling, or history penalties stays intact and routes to the plain lane.
+    The returned reason is stable operator-facing telemetry, not wire output.
+    """
+    incompatible: list[str] = []
+    if getattr(params, "n", 1) != 1:
+        incompatible.append("n")
+    if float(getattr(params, "temperature", 1.0)) != 0.0:
+        incompatible.append("sampling")
+    for field, neutral in (
+        ("presence_penalty", 0.0),
+        ("frequency_penalty", 0.0),
+        ("repetition_penalty", 1.0),
+        ("min_p", 0.0),
+        ("min_tokens", 0),
+    ):
+        if getattr(params, field, neutral) != neutral:
+            incompatible.append(field)
+    for field in (
+        "logprobs",
+        "logprob_token_ids",
+        "structured_outputs",
+        "logit_bias",
+        "allowed_token_ids",
+    ):
+        value = getattr(params, field, None)
+        if value is not None:
+            incompatible.append(field)
+    if getattr(params, "flat_logprobs", False):
+        incompatible.append("flat_logprobs")
+    if getattr(params, "bad_words", None):
+        incompatible.append("bad_words")
+    if incompatible:
+        return TT_EXECUTION_LANE_PLAIN, ",".join(dict.fromkeys(incompatible))
+    return TT_EXECUTION_LANE_DFLASH, "eligible_greedy"
+
 
 def get_tt_adaptive_block_max_prompt_tokens(vllm_config: "VllmConfig") -> int:
     """Prompt-length frontier for the adaptive block path (0 = no limit).

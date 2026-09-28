@@ -12,12 +12,19 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_tt_plugin.config import (
+    TT_EXECUTION_LANE_DFLASH,
+    TT_EXECUTION_LANE_PLAIN,
+    classify_tt_execution_lane,
     get_tt_adaptive_block_max_prompt_tokens,
     get_tt_block_kv_extent_tokens,
     get_tt_decode_interleave_config,
     get_tt_output_tokens_per_step,
+    has_tt_plain_fallback,
+    is_tt_adaptive_block_batched,
     is_tt_adaptive_block_output_model,
+    is_tt_adaptive_block_ragged,
     is_tt_block_output_model,
+    is_tt_block_output_multimodal,
 )
 from vllm_tt_plugin.logger import init_tt_logger
 
@@ -33,6 +40,8 @@ logger = init_tt_logger(__name__)
 # request IDs, identify exactly how many newest in-flight frames a wholesale
 # prefix-cache reset made stale.
 _TT_FORCED_RESET_DISCARD_COUNTS_ATTR = "_tt_forced_reset_discard_counts"
+_TT_EXECUTION_LANE_ATTR = "_tt_execution_lane"
+_TT_REQUEST_EXECUTION_LANES_ATTR = "_tt_request_execution_lanes"
 
 
 def set_tt_forced_reset_discard_counts(
@@ -71,6 +80,33 @@ def get_tt_block_step_decisions(
     scheduler_output: SchedulerOutput,
 ) -> dict[str, bool]:
     return dict(getattr(scheduler_output, _TT_BLOCK_STEP_DECISIONS_ATTR, {}))
+
+
+def set_tt_execution_lane(scheduler_output: SchedulerOutput, lane: str) -> None:
+    setattr(scheduler_output, _TT_EXECUTION_LANE_ATTR, lane)
+
+
+def get_tt_execution_lane(scheduler_output: SchedulerOutput) -> str:
+    return str(getattr(scheduler_output, _TT_EXECUTION_LANE_ATTR, "prefill"))
+
+
+def set_tt_request_execution_lanes(
+    scheduler_output: SchedulerOutput, lanes: dict[str, str]
+) -> None:
+    """Attach the admission-pinned lane for every request in this step.
+
+    Prefill steps may contain both request classes, so their scalar step lane is
+    deliberately ``prefill``.  The per-request map lets the model select the
+    matching state-producing prefill path without reclassifying sampling
+    parameters or manufacturing speculative state for a plain request.
+    """
+    setattr(scheduler_output, _TT_REQUEST_EXECUTION_LANES_ATTR, dict(lanes))
+
+
+def get_tt_request_execution_lanes(
+    scheduler_output: SchedulerOutput,
+) -> dict[str, str]:
+    return dict(getattr(scheduler_output, _TT_REQUEST_EXECUTION_LANES_ATTR, {}))
 
 
 class TTSchedulingMode(Enum):
@@ -240,9 +276,22 @@ class TTScheduler(AsyncScheduler):
         self._spec_session_owner: str | None = None
         self._output_tokens_per_step = get_tt_output_tokens_per_step(self.vllm_config)
         self._is_block_output_model = is_tt_block_output_model(self.vllm_config)
+        self._plain_fallback = has_tt_plain_fallback(self.vllm_config)
+        self._request_execution_lane: dict[str, str] = {}
+        self._request_routing_reason: dict[str, str] = {}
+        self._last_decode_lane: str | None = None
+        self._block_output_multimodal = is_tt_block_output_multimodal(self.vllm_config)
         # Adaptive: emit the block only on a solo decode step; batch >1 decodes
         # as plain baseline. Lets max_num_seqs>1 coexist with block-output.
         self._is_adaptive_block = is_tt_adaptive_block_output_model(self.vllm_config)
+        self._adaptive_block_batched = is_tt_adaptive_block_batched(self.vllm_config)
+        self._adaptive_block_ragged = is_tt_adaptive_block_ragged(self.vllm_config)
+        if self._adaptive_block_ragged and not (
+            self._is_adaptive_block and self._adaptive_block_batched
+        ):
+            raise ValueError(
+                "tt_adaptive_block_ragged requires tt_adaptive_block_batched"
+            )
         # Prompt-length frontier for the block path (0 = none): a longer prompt
         # is served as plain baseline by the model for its whole lifetime, so
         # its steps reserve width-1 even when solo.
@@ -332,12 +381,30 @@ class TTScheduler(AsyncScheduler):
                     request.request_id,
                 )
                 return
-            self._truncate_unservable_block_prompt(request)
-            self._align_block_output_max_tokens(request)
-            self._neutralize_block_output_host_sampling(request)
+            lane, reason = (
+                classify_tt_execution_lane(request.sampling_params)
+                if self._plain_fallback and request.sampling_params is not None
+                else (TT_EXECUTION_LANE_DFLASH, "block_only")
+            )
+            self._request_execution_lane[request.request_id] = lane
+            self._request_routing_reason[request.request_id] = reason
+            logger.info(
+                "TT request %s routed to %s lane (%s)",
+                request.request_id,
+                lane,
+                reason,
+            )
+            self._truncate_unservable_block_prompt(
+                request, block_lane=lane == TT_EXECUTION_LANE_DFLASH
+            )
+            if lane == TT_EXECUTION_LANE_DFLASH:
+                self._align_block_output_max_tokens(request)
+                self._neutralize_block_output_host_sampling(request)
         super().add_request(request)
 
-    def _truncate_unservable_block_prompt(self, request: Request) -> None:
+    def _truncate_unservable_block_prompt(
+        self, request: Request, *, block_lane: bool = True
+    ) -> None:
         """Contain a bypassed prompt that leaves no room for a whole canvas.
 
         Frontend validation rejects such prompts; a prebuilt EngineCoreRequest
@@ -358,7 +425,7 @@ class TTScheduler(AsyncScheduler):
         """
         from vllm_tt_plugin.platform import _TT_TOKEN_TILE_SIZE
 
-        if request.mm_features:
+        if request.mm_features and not self._block_output_multimodal:
             # A text-only block model has a zero encoder budget: a feature at
             # offset 0 forces zero-token schedules forever (head-of-line
             # stall), and an interior offset carves a partial prefill chunk
@@ -419,7 +486,8 @@ class TTScheduler(AsyncScheduler):
         tile = _TT_TOKEN_TILE_SIZE
         max_model_len = int(self.vllm_config.model_config.max_model_len)
         aligned_max_model_len = max_model_len // tile * tile
-        keep = (aligned_max_model_len - self._output_tokens_per_step) // tile * tile
+        output_width = self._output_tokens_per_step if block_lane else 1
+        keep = (aligned_max_model_len - output_width) // tile * tile
         if request.num_prompt_tokens <= keep:
             return
         logger.warning(
@@ -429,7 +497,7 @@ class TTScheduler(AsyncScheduler):
             "finish length-capped",
             request.request_id,
             request.num_prompt_tokens,
-            self._output_tokens_per_step,
+            output_width,
             keep,
         )
         if request.prompt_token_ids is not None:
@@ -587,16 +655,9 @@ class TTScheduler(AsyncScheduler):
             # result unchanged so the coordinator can decide whether all lanes
             # should fall back to decode together.
             result = self._schedule_prefill_only()
-            return self._finalize_scheduler_output(result)
+            return self._finalize_scheduler_output(result, "prefill")
         if mode == TTSchedulingMode.DECODE_ONLY:
-            if has_pending_prefill:
-                # Hide the waiting queues and partial prefills so the base
-                # scheduler cannot admit prefill work.
-                result = self._schedule_decode_only()
-                return self._finalize_scheduler_output(result)
-            # No pending prefill: base scheduler naturally runs decode-only.
-            result = super().schedule()
-            return self._finalize_scheduler_output(result)
+            return self._schedule_decode_lane()
 
         # Default mode:
         # Prefer prefill whenever prefill work is pending, so new requests are
@@ -612,8 +673,7 @@ class TTScheduler(AsyncScheduler):
                 self._decode_interleave.record_step(
                     is_decode=True, prefill_pending=True
                 )
-                result = self._schedule_decode_only()
-                return self._finalize_scheduler_output(result)
+                return self._schedule_decode_lane()
             prefill_result = self._schedule_prefill_only()
             # If prefill cannot make progress (e.g. KV pressure), do not stall
             # decode. Fall back to decode-only so running requests can advance
@@ -622,7 +682,7 @@ class TTScheduler(AsyncScheduler):
                 self._decode_interleave.record_step(
                     is_decode=True, prefill_pending=True
                 )
-                result = self._schedule_decode_only()
+                result = self._schedule_decode_lane()
                 # Even an empty prefill pass drains upstream cleanup events.
                 # The runner must receive them with the replacement decode.
                 result.finished_req_ids |= prefill_result.finished_req_ids
@@ -634,24 +694,84 @@ class TTScheduler(AsyncScheduler):
                     result.preempted_req_ids = (
                         result.preempted_req_ids or set()
                     ) | prefill_result.preempted_req_ids
-                return self._finalize_scheduler_output(result)
+                return result
             self._decode_interleave.record_step(is_decode=False, prefill_pending=True)
-            return self._finalize_scheduler_output(prefill_result)
+            return self._finalize_scheduler_output(prefill_result, "prefill")
 
         # No pending prefill work in default mode: run decode-only naturally.
         self._decode_interleave.record_step(is_decode=True, prefill_pending=False)
-        result = super().schedule()
-        return self._finalize_scheduler_output(result)
+        return self._schedule_decode_lane()
+
+    def _decode_lanes_with_work(self) -> list[str]:
+        request_execution_lane = getattr(self, "_request_execution_lane", {})
+        if not request_execution_lane:
+            return (
+                [TT_EXECUTION_LANE_DFLASH]
+                if any(not request.is_prefill_chunk for request in self.running)
+                else []
+            )
+        lanes = {
+            request_execution_lane.get(request.request_id, TT_EXECUTION_LANE_DFLASH)
+            for request in self.running
+            if not request.is_prefill_chunk
+        }
+        return [
+            lane
+            for lane in (TT_EXECUTION_LANE_DFLASH, TT_EXECUTION_LANE_PLAIN)
+            if lane in lanes
+        ]
+
+    def _schedule_decode_lane(self) -> SchedulerOutput:
+        """Schedule one homogeneous decode contract and alternate when both run."""
+        if not hasattr(self, "_request_execution_lane"):
+            return self._finalize_scheduler_output(
+                self._schedule_decode_only(), TT_EXECUTION_LANE_DFLASH
+            )
+        lanes = self._decode_lanes_with_work()
+        if not lanes:
+            return self._finalize_scheduler_output(
+                self._schedule_decode_only(), TT_EXECUTION_LANE_DFLASH
+            )
+        if len(lanes) == 1:
+            lane = lanes[0]
+        else:
+            lane = (
+                TT_EXECUTION_LANE_PLAIN
+                if getattr(self, "_last_decode_lane", TT_EXECUTION_LANE_PLAIN)
+                == TT_EXECUTION_LANE_DFLASH
+                else TT_EXECUTION_LANE_DFLASH
+            )
+        result = self._schedule_decode_only(lane)
+        if result.total_num_scheduled_tokens:
+            self._last_decode_lane = lane
+        return self._finalize_scheduler_output(result, lane)
 
     def _finalize_scheduler_output(
-        self, scheduler_output: SchedulerOutput
+        self, scheduler_output: SchedulerOutput, execution_lane: str
     ) -> SchedulerOutput:
+        # Some scheduler policy tests intentionally build a minimal instance
+        # without invoking ``__init__``.  An absent map is the historical
+        # all-DFlash policy, so keep finalization independent of that fixture
+        # construction detail.
+        request_execution_lane = getattr(self, "_request_execution_lane", {})
+        set_tt_execution_lane(scheduler_output, execution_lane)
+        set_tt_request_execution_lanes(
+            scheduler_output,
+            {
+                req_id: request_execution_lane.get(req_id, TT_EXECUTION_LANE_DFLASH)
+                for req_id in scheduler_output.num_scheduled_tokens
+            },
+        )
         pending_reset_discards = getattr(
             self, "_pending_forced_reset_discard_counts", {}
         )
         if pending_reset_discards:
             set_tt_forced_reset_discard_counts(scheduler_output, pending_reset_discards)
             self._pending_forced_reset_discard_counts = {}
+        request_routing_reason = getattr(self, "_request_routing_reason", {})
+        for req_id in scheduler_output.finished_req_ids:
+            request_execution_lane.pop(req_id, None)
+            request_routing_reason.pop(req_id, None)
         return scheduler_output
 
     def _schedule_prefill_only(self) -> SchedulerOutput:
@@ -675,7 +795,9 @@ class TTScheduler(AsyncScheduler):
             self.max_num_running_reqs = saved_max
         return result
 
-    def _schedule_decode_only(self) -> SchedulerOutput:
+    def _schedule_decode_only(
+        self, execution_lane: str | None = None
+    ) -> SchedulerOutput:
         """Schedule only running decode requests.
 
         Temporarily hides both the ``waiting`` and ``skipped_waiting`` queues
@@ -685,15 +807,32 @@ class TTScheduler(AsyncScheduler):
         either.  Any requests that get preempted during decode scheduling are
         merged back into the original queues afterwards.
         """
-        partial_prefills = [r for r in self.running if r.is_prefill_chunk]
+        request_execution_lane = getattr(self, "_request_execution_lane", {})
+        hidden_requests = [
+            request
+            for request in self.running
+            if request.is_prefill_chunk
+            or (
+                execution_lane is not None
+                and request_execution_lane.get(
+                    request.request_id, TT_EXECUTION_LANE_DFLASH
+                )
+                != execution_lane
+            )
+        ]
 
         saved_waiting = self.waiting
         saved_skipped = getattr(self, "skipped_waiting", None)
         self.waiting = create_request_queue(self.policy)
         if saved_skipped is not None:
             self.skipped_waiting = create_request_queue(self.policy)
-        if partial_prefills:
-            self.running = [r for r in self.running if not r.is_prefill_chunk]
+        if hidden_requests:
+            hidden_object_ids = {id(request) for request in hidden_requests}
+            self.running = [
+                request
+                for request in self.running
+                if id(request) not in hidden_object_ids
+            ]
         try:
             result = super().schedule()
         finally:
@@ -704,8 +843,8 @@ class TTScheduler(AsyncScheduler):
                     saved_skipped.prepend_requests(self.skipped_waiting)
                 self.skipped_waiting = saved_skipped
             self.waiting = saved_waiting
-            if partial_prefills:
-                self.running.extend(partial_prefills)
+            if hidden_requests:
+                self.running.extend(hidden_requests)
         return result
 
     def reset_prefix_cache(
@@ -794,8 +933,28 @@ class TTScheduler(AsyncScheduler):
         # matching SchedulerOutput back to update_from_output, so the map always
         # pairs with the output being committed.
         solo = len(scheduler_output.num_scheduled_tokens) == 1
-        if self._is_adaptive_block:
+        if self._is_adaptive_block and not self._adaptive_block_batched:
             self._mirror_spec_session(scheduler_output, solo)
+
+        def _is_decode(req_id: str) -> bool:
+            request = self.requests[req_id]
+            scheduled = scheduler_output.num_scheduled_tokens[req_id]
+            return request.num_computed_tokens - scheduled >= request.num_prompt_tokens
+
+        batched_block = False
+        if self._is_adaptive_block and self._adaptive_block_batched and not solo:
+            decodes = [
+                _is_decode(req_id)
+                for req_id in scheduler_output.num_scheduled_tokens
+                if not self.requests[req_id].is_prefill_chunk
+            ]
+            if decodes and any(decodes) and not all(decodes):
+                raise RuntimeError(
+                    "tt_adaptive_block_batched: a step mixes prefill and decode "
+                    f"requests ({sum(decodes)} decode of {len(decodes)}); the "
+                    "batched block contract needs decode-only steps"
+                )
+            batched_block = bool(decodes) and all(decodes)
         decisions: dict[str, bool] = {}
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
@@ -810,21 +969,30 @@ class TTScheduler(AsyncScheduler):
                 # cannot skew it. A resumed replay scheduling prompt+output
                 # tokens lands back below the prompt boundary and correctly
                 # stays a non-block step.
-                scheduled = scheduler_output.num_scheduled_tokens[req_id]
-                is_decode = (
-                    request.num_computed_tokens - scheduled >= request.num_prompt_tokens
+                is_decode = _is_decode(req_id)
+                spec_eligible = self._spec_frontier_ok(request.num_prompt_tokens)
+                dflash_lane = (
+                    self._request_execution_lane.get(req_id, TT_EXECUTION_LANE_DFLASH)
+                    == TT_EXECUTION_LANE_DFLASH
                 )
-                # Owning the model's single spec session is the whole gate:
-                # the model serves a solo decode as plain baseline whenever it
-                # has no session for THAT request, so reserving a block for a
-                # non-owner would reserve a width the model cannot emit (see
-                # _mirror_spec_session). The capture frontier is deliberately
-                # NOT re-derived here -- it is a property of the PREFILL that
-                # armed the session, already recorded in the ownership mirror,
-                # and re-deriving it from the request's CURRENT length would
-                # flip a live session's reservation to width 1 mid-generation
-                # while the model keeps emitting blocks.
-                block_step = solo and is_decode and self._spec_session_owner == req_id
+                if self._adaptive_block_batched:
+                    block_step = (
+                        dflash_lane
+                        and (solo or batched_block)
+                        and is_decode
+                        and spec_eligible
+                    )
+                else:
+                    # The non-batched adaptive contract has one model-owned
+                    # speculative session. Its scheduler-side mirror is the
+                    # source of truth for whether this solo decode can emit a
+                    # block; lane admission alone is not sufficient.
+                    block_step = (
+                        dflash_lane
+                        and solo
+                        and is_decode
+                        and self._spec_session_owner == req_id
+                    )
             else:
                 block_step = True
             if block_step:
@@ -970,10 +1138,23 @@ class TTScheduler(AsyncScheduler):
                 "block-output frames cannot be discarded (reset/preempt of a "
                 "running block request is unsupported)"
             )
-        if len(new_token_ids) != self._output_tokens_per_step:
+        width = len(new_token_ids)
+        if self._adaptive_block_ragged:
+            if not 1 <= width <= self._output_tokens_per_step:
+                raise ValueError(
+                    "Model output width violates output_tokens_per_step "
+                    f"(ragged block): {width} not in "
+                    f"1..{self._output_tokens_per_step}"
+                )
+            if any(token_id < 0 for token_id in new_token_ids):
+                raise ValueError(
+                    "Ragged block output reached the scheduler with padding: "
+                    f"{new_token_ids}"
+                )
+        elif width != self._output_tokens_per_step:
             raise ValueError(
                 "Model output width violates output_tokens_per_step: "
-                f"{len(new_token_ids)} != {self._output_tokens_per_step} "
+                f"{width} != {self._output_tokens_per_step} "
                 f"(req_id={request.request_id!r}); the scheduler reserved a "
                 "block but the model returned a different width -- the "
                 "scheduler and model block gates disagree"

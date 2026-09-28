@@ -790,6 +790,8 @@ class TTAsyncDecodeController:
             "kv_cache": runner.kv_caches,
             "start_pos": model_input.input_positions,
         }
+        if getattr(runner, "_plain_fallback", False):
+            kwargs["execution_lane"] = model_input.execution_lane
         # Hybrid attention models route per-layer block tables; the
         # runner already populated ``block_tables_per_layer`` at
         # submission time when the kv_cache_config has multiple groups.

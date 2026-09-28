@@ -84,7 +84,7 @@ def test_decode_fallback_preserves_cleanup_from_both_outputs(
     decode.preempted_req_ids = decode_preemptions
     decode.free_encoder_mm_hashes = ["image-decode"]
     monkeypatch.setattr(scheduler, "_schedule_prefill_only", lambda: prefill)
-    monkeypatch.setattr(scheduler, "_schedule_decode_only", lambda: decode)
+    monkeypatch.setattr(scheduler, "_schedule_decode_only", lambda *_args: decode)
 
     result = scheduler.schedule()
 

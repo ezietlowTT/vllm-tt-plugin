@@ -44,7 +44,9 @@ from vllm_tt_plugin.config import (
     get_tt_max_batch_size,
     get_tt_output_tokens_per_step,
     get_tt_per_lane_max_num_seqs,
+    has_tt_plain_fallback,
     is_tt_adaptive_block_output_model,
+    is_tt_adaptive_block_ragged,
     is_tt_block_output_model,
 )
 from vllm_tt_plugin.input_batch import (
@@ -66,7 +68,11 @@ from vllm_tt_plugin.model_input import (
     slice_tt_sampling_params,
 )
 from vllm_tt_plugin.platform import TTPlatform
-from vllm_tt_plugin.scheduler import get_tt_forced_reset_discard_counts
+from vllm_tt_plugin.scheduler import (
+    get_tt_execution_lane,
+    get_tt_forced_reset_discard_counts,
+    get_tt_request_execution_lanes,
+)
 from vllm_tt_plugin.structured_output import (
     has_structured_outputs,
     reorder_grammar_bitmask_for_tt_batch,
@@ -196,6 +202,10 @@ class TTModelRunner:
         self._output_tokens_per_step = get_tt_output_tokens_per_step(vllm_config)
         self._is_block_output_model = is_tt_block_output_model(vllm_config)
         self._is_adaptive_block_output = is_tt_adaptive_block_output_model(vllm_config)
+        self._plain_fallback = has_tt_plain_fallback(vllm_config)
+        # Ragged batched blocks: a decode block step's [num_reqs, W] rows carry
+        # 1..W real ids each, -1 padded; only the real ids are committed.
+        self._is_adaptive_block_ragged = is_tt_adaptive_block_ragged(vllm_config)
         self._persistent_capture_released = False
 
         if self.model_config.is_encoder_decoder:
@@ -434,7 +444,9 @@ class TTModelRunner:
                 block_sizes=per_group_block_sizes,
                 kernel_block_sizes=per_group_block_sizes,
                 logitsprocs=self._host_logitsprocs,
-                disable_logprobs=self._is_block_output_model,
+                disable_logprobs=(
+                    self._is_block_output_model and not self._plain_fallback
+                ),
                 output_tokens_per_step=self._output_tokens_per_step,
             )
         else:
@@ -446,7 +458,9 @@ class TTModelRunner:
                 block_sizes=per_group_block_sizes,
                 kernel_block_sizes=per_group_block_sizes,
                 logitsprocs=self._host_logitsprocs,
-                disable_logprobs=self._is_block_output_model,
+                disable_logprobs=(
+                    self._is_block_output_model and not self._plain_fallback
+                ),
                 output_tokens_per_step=self._output_tokens_per_step,
             )
 
@@ -1369,6 +1383,7 @@ class TTModelRunner:
             is_decode=not is_prompt,
             has_structured_outputs=has_structured,
             sampling_rows=req_indices,
+            execution_lane=get_tt_execution_lane(scheduler_output),
         )
         if intermediate_prefill_mask is not None and intermediate_prefill_mask.any():
             # Device sampling advances device RNG state for every row it reads,
@@ -1538,6 +1553,20 @@ class TTModelRunner:
 
         # Prepare model inputs only
         model_input = self._prepare_model_inputs(scheduler_output, grammar_output)
+        request_lanes = get_tt_request_execution_lanes(scheduler_output)
+        model_input = replace(
+            model_input,
+            execution_lane=get_tt_execution_lane(scheduler_output),
+            request_execution_lanes=(
+                [
+                    request_lanes.get(req_id, "dflash")
+                    for req_id in model_input.row_req_ids
+                ]
+                if model_input.prompt_lens is not None
+                and model_input.row_req_ids is not None
+                else None
+            ),
+        )
         return model_input
 
     # All lane-specific input/output shaping lives in ``TTLaneInputBatch``
@@ -1615,6 +1644,19 @@ class TTModelRunner:
 
         # Grammar is applied at sample time, so the forward builds without it.
         model_input = lane_batch.build_model_input(self, scheduler_output, None, plan)
+        request_lanes = get_tt_request_execution_lanes(scheduler_output)
+        model_input = replace(
+            model_input,
+            execution_lane=get_tt_execution_lane(scheduler_output),
+            request_execution_lanes=(
+                [
+                    request_lanes.get(lane_batch.req_ids[row], "dflash")
+                    for row in plan.input_rows
+                ]
+                if not plan.is_decode
+                else None
+            ),
+        )
         if plan.is_decode:
             # ``slot_grammar_bitmask`` reorders against the full decode capacity.
             lane_total = plan.capacity
@@ -1986,7 +2028,17 @@ class TTModelRunner:
         has_structured_outputs: bool,
         *,
         sampling_rows: list[int] | None = None,
+        execution_lane: str | None = None,
     ) -> bool:
+        # DFlash owns its greedy token trajectory. Plain fallback exists to
+        # preserve ordinary vLLM sampling semantics, and the TT device sampler
+        # is not yet equivalent for every one of those controls (in
+        # particular, greedy + penalties can terminate after the first token).
+        # Keep the entire plain lane on vLLM's reference host sampler. This is
+        # selected once for the homogeneous step, so no request parameter is
+        # erased and DFlash performance is unaffected.
+        if execution_lane == "plain":
+            return False
         want_device_sampling = self.sample_on_device_mode == "all" or (
             self.sample_on_device_mode == "decode_only" and is_decode
         )
@@ -2108,6 +2160,9 @@ class TTModelRunner:
                     empty_slots.append(dp_rank * stride + i)
         if empty_slots is not None:
             kwargs["empty_slots"] = list(empty_slots)
+        request_execution_lanes = getattr(model_input, "request_execution_lanes", None)
+        if request_execution_lanes is not None:
+            kwargs["request_execution_lanes"] = list(request_execution_lanes)
 
         if self.request_specific_rope:
             tt_out, rope_deltas = self.model.prefill_forward(**kwargs)
@@ -2248,6 +2303,7 @@ class TTModelRunner:
                 not perform_device_sampling
                 and self._is_block_output_model
                 and not (self._is_adaptive_block_output and not is_decode)
+                and model_input.execution_lane != "plain"
             ):
                 raise ValueError(
                     "Block-output step fell back to host sampling; "
