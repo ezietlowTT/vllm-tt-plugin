@@ -26,10 +26,19 @@ from types import SimpleNamespace
 import pytest
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 
-from vllm_tt_plugin.scheduler import TTScheduler, spec_lookahead_tokens
-from vllm_tt_plugin.spec_admission import MODEL_OWNED_DRAFT_METHOD
+from vllm_tt_plugin.scheduler import (
+    TTScheduler,
+    get_tt_spec_decode_lane,
+    spec_lookahead_tokens,
+)
+from vllm_tt_plugin.spec_admission import (
+    MODEL_OWNED_DRAFT_METHOD,
+    SPEC_DECODE_LANE_ORDINARY,
+    SPEC_DECODE_LANE_SPECULATIVE,
+)
 from vllm_tt_plugin.spec_decode import (
     ACCEPT_MODE_ARGMAX_IDS,
     DRAFTER_STATE_INTERNAL,
@@ -225,3 +234,75 @@ def test_an_ngram_launch_reserves_nothing():
 
 
 # endregion Lookahead for a model-owned drafter
+
+
+# region Homogeneous request lanes
+
+
+def test_mixed_decode_lanes_alternate_without_sharing_a_step(monkeypatch):
+    scheduler = TTScheduler.__new__(TTScheduler)
+    scheduler._separate_spec_decode_lanes = True
+    scheduler._last_spec_decode_lane = None
+    scheduler._request_spec_decode_lane = {
+        "greedy": SPEC_DECODE_LANE_SPECULATIVE,
+        "sampled": SPEC_DECODE_LANE_ORDINARY,
+    }
+    scheduler.running = [
+        SimpleNamespace(request_id="greedy", is_prefill_chunk=False),
+        SimpleNamespace(request_id="sampled", is_prefill_chunk=False),
+    ]
+    seen = []
+
+    def schedule_lane(lane=None):
+        seen.append(lane)
+        output = SchedulerOutput.make_empty()
+        req_id = "greedy" if lane == SPEC_DECODE_LANE_SPECULATIVE else "sampled"
+        output.num_scheduled_tokens = {req_id: 1}
+        output.total_num_scheduled_tokens = 1
+        return output
+
+    monkeypatch.setattr(scheduler, "_schedule_decode_only", schedule_lane)
+
+    outputs = [scheduler._schedule_decode_lane() for _ in range(4)]
+
+    assert seen == [
+        SPEC_DECODE_LANE_SPECULATIVE,
+        SPEC_DECODE_LANE_ORDINARY,
+        SPEC_DECODE_LANE_SPECULATIVE,
+        SPEC_DECODE_LANE_ORDINARY,
+    ]
+    assert [get_tt_spec_decode_lane(output) for output in outputs] == seen
+    assert all(len(output.num_scheduled_tokens) == 1 for output in outputs)
+
+
+def test_decode_only_hides_the_opposing_lane_from_upstream(monkeypatch):
+    scheduler = TTScheduler.__new__(TTScheduler)
+    scheduler.policy = SchedulingPolicy.FCFS
+    scheduler.waiting = create_request_queue(scheduler.policy)
+    scheduler.skipped_waiting = create_request_queue(scheduler.policy)
+    greedy = SimpleNamespace(request_id="greedy", is_prefill_chunk=False)
+    sampled = SimpleNamespace(request_id="sampled", is_prefill_chunk=False)
+    prefill = SimpleNamespace(request_id="prefill", is_prefill_chunk=True)
+    scheduler.running = [greedy, sampled, prefill]
+    scheduler._request_spec_decode_lane = {
+        "greedy": SPEC_DECODE_LANE_SPECULATIVE,
+        "sampled": SPEC_DECODE_LANE_ORDINARY,
+    }
+    visible = []
+
+    def fake_schedule(self, throttle_prefills=False):
+        visible.append([request.request_id for request in self.running])
+        return SchedulerOutput.make_empty()
+
+    monkeypatch.setattr(Scheduler, "schedule", fake_schedule)
+    scheduler._schedule_decode_only(SPEC_DECODE_LANE_ORDINARY)
+
+    assert visible == [["sampled"]]
+    assert {request.request_id for request in scheduler.running} == {
+        "greedy",
+        "sampled",
+        "prefill",
+    }
+
+
+# endregion Homogeneous request lanes
