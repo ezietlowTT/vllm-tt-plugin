@@ -298,11 +298,46 @@ def test_decode_only_hides_the_opposing_lane_from_upstream(monkeypatch):
     scheduler._schedule_decode_only(SPEC_DECODE_LANE_ORDINARY)
 
     assert visible == [["sampled"]]
-    assert {request.request_id for request in scheduler.running} == {
+    assert [request.request_id for request in scheduler.running] == [
         "greedy",
         "sampled",
         "prefill",
+    ]
+
+
+def test_decode_only_restores_global_order_and_omits_a_preempted_visible_request(
+    monkeypatch,
+):
+    scheduler = TTScheduler.__new__(TTScheduler)
+    scheduler.policy = SchedulingPolicy.FCFS
+    scheduler.waiting = create_request_queue(scheduler.policy)
+    scheduler.skipped_waiting = create_request_queue(scheduler.policy)
+    speculative_a = SimpleNamespace(request_id="spec-a", is_prefill_chunk=False)
+    ordinary_a = SimpleNamespace(request_id="plain-a", is_prefill_chunk=False)
+    speculative_b = SimpleNamespace(request_id="spec-b", is_prefill_chunk=False)
+    ordinary_b = SimpleNamespace(request_id="plain-b", is_prefill_chunk=False)
+    scheduler.running = [speculative_a, ordinary_a, speculative_b, ordinary_b]
+    scheduler._request_spec_decode_lane = {
+        "spec-a": SPEC_DECODE_LANE_SPECULATIVE,
+        "plain-a": SPEC_DECODE_LANE_ORDINARY,
+        "spec-b": SPEC_DECODE_LANE_SPECULATIVE,
+        "plain-b": SPEC_DECODE_LANE_ORDINARY,
     }
+
+    def fake_schedule(self, throttle_prefills=False):
+        assert self.running == [ordinary_a, ordinary_b]
+        # Model a base-scheduler preemption of the first visible request.
+        self.running = [ordinary_b]
+        return SchedulerOutput.make_empty()
+
+    monkeypatch.setattr(Scheduler, "schedule", fake_schedule)
+    scheduler._schedule_decode_only(SPEC_DECODE_LANE_ORDINARY)
+
+    assert [request.request_id for request in scheduler.running] == [
+        "spec-a",
+        "spec-b",
+        "plain-b",
+    ]
 
 
 # endregion Homogeneous request lanes

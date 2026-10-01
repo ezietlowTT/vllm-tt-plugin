@@ -825,8 +825,11 @@ class TTScheduler(AsyncScheduler):
         admits new ones.  Adjusts max_num_running_reqs so the waiting loop
         respects the true capacity with the decodes hidden.
         """
-        pure_decodes = [r for r in self.running if not r.is_prefill_chunk]
-        partial_prefills = [r for r in self.running if r.is_prefill_chunk]
+        original_running = list(self.running)
+        original_ids = {id(request) for request in original_running}
+        pure_decodes = [r for r in original_running if not r.is_prefill_chunk]
+        pure_decode_ids = {id(request) for request in pure_decodes}
+        partial_prefills = [r for r in original_running if r.is_prefill_chunk]
 
         saved_max = self.max_num_running_reqs
         self.running = cast(list[Request], partial_prefills)
@@ -834,7 +837,21 @@ class TTScheduler(AsyncScheduler):
         try:
             result = super().schedule()
         finally:
-            self.running.extend(pure_decodes)
+            scheduled_running = list(self.running)
+            scheduled_ids = {id(request) for request in scheduled_running}
+            # Reinsert hidden decodes at their original positions. New prefills
+            # admitted by the base scheduler remain after the pre-existing
+            # requests, while preempted partial prefills remain removed.
+            self.running = [
+                request
+                for request in original_running
+                if id(request) in pure_decode_ids or id(request) in scheduled_ids
+            ]
+            self.running.extend(
+                request
+                for request in scheduled_running
+                if id(request) not in original_ids
+            )
             self.max_num_running_reqs = saved_max
         return result
 
@@ -850,6 +867,8 @@ class TTScheduler(AsyncScheduler):
         either.  Any requests that get preempted during decode scheduling are
         merged back into the original queues afterwards.
         """
+        original_running = list(self.running)
+        original_ids = {id(request) for request in original_running}
         request_lanes = getattr(self, "_request_spec_decode_lane", {})
         hidden_requests = [
             request
@@ -883,7 +902,21 @@ class TTScheduler(AsyncScheduler):
                 self.skipped_waiting = saved_skipped
             self.waiting = saved_waiting
             if hidden_requests:
-                self.running.extend(hidden_requests)
+                scheduled_running = list(self.running)
+                scheduled_ids = {id(request) for request in scheduled_running}
+                hidden_ids = {id(request) for request in hidden_requests}
+                # Preserve the global running order while leaving visible
+                # requests that the base scheduler preempted out of the list.
+                self.running = [
+                    request
+                    for request in original_running
+                    if id(request) in hidden_ids or id(request) in scheduled_ids
+                ]
+                self.running.extend(
+                    request
+                    for request in scheduled_running
+                    if id(request) not in original_ids
+                )
         return result
 
     def reset_prefix_cache(
