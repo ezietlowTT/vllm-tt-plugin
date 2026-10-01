@@ -76,10 +76,14 @@ def test_bad_word_allowance_preserves_masks_seeds_and_output_assertion(monkeypat
     test(None, "reference", 32, 512)
     before, before_kwargs = seen[0]
     after, after_kwargs = seen[1]
-    assert before_kwargs == after_kwargs == {
-        "use_chat": True,
-        "return_full_response": True,
-    }
+    assert (
+        before_kwargs
+        == after_kwargs
+        == {
+            "use_chat": True,
+            "return_full_response": True,
+        }
+    )
     assert len(after) == 5
     for first, second in zip(before, after):
         assert first.max_tokens == 100
