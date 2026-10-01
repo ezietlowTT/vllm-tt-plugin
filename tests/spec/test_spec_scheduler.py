@@ -275,6 +275,68 @@ def test_mixed_decode_lanes_alternate_without_sharing_a_step(monkeypatch):
     assert all(len(output.num_scheduled_tokens) == 1 for output in outputs)
 
 
+def test_new_speculative_prefill_seeds_before_ordinary_lane(monkeypatch):
+    scheduler = TTScheduler.__new__(TTScheduler)
+    scheduler._separate_spec_decode_lanes = True
+    scheduler._last_spec_decode_lane = SPEC_DECODE_LANE_SPECULATIVE
+    scheduler._pending_spec_seed_req_ids = {"greedy"}
+    scheduler._request_spec_decode_lane = {
+        "greedy": SPEC_DECODE_LANE_SPECULATIVE,
+        "sampled": SPEC_DECODE_LANE_ORDINARY,
+    }
+    scheduler.running = [
+        SimpleNamespace(request_id="greedy", is_prefill_chunk=False),
+        SimpleNamespace(request_id="sampled", is_prefill_chunk=False),
+    ]
+    seen = []
+
+    def schedule_lane(lane=None):
+        seen.append(lane)
+        output = SchedulerOutput.make_empty()
+        req_id = "greedy" if lane == SPEC_DECODE_LANE_SPECULATIVE else "sampled"
+        output.num_scheduled_tokens = {req_id: 1}
+        output.total_num_scheduled_tokens = 1
+        return output
+
+    monkeypatch.setattr(scheduler, "_schedule_decode_only", schedule_lane)
+
+    first = scheduler._schedule_decode_lane()
+    second = scheduler._schedule_decode_lane()
+
+    assert seen == [SPEC_DECODE_LANE_SPECULATIVE, SPEC_DECODE_LANE_ORDINARY]
+    assert get_tt_spec_decode_lane(first) == SPEC_DECODE_LANE_SPECULATIVE
+    assert get_tt_spec_decode_lane(second) == SPEC_DECODE_LANE_ORDINARY
+    assert scheduler._pending_spec_seed_req_ids == set()
+
+
+def test_completed_speculative_prefill_arms_seed_barrier():
+    scheduler = TTScheduler.__new__(TTScheduler)
+    scheduler._pending_spec_seed_req_ids = set()
+    scheduler._request_spec_decode_lane = {
+        "ready-spec": SPEC_DECODE_LANE_SPECULATIVE,
+        "partial-spec": SPEC_DECODE_LANE_SPECULATIVE,
+        "ready-plain": SPEC_DECODE_LANE_ORDINARY,
+    }
+    scheduler._request_spec_decode_reason = {}
+    scheduler._pending_forced_reset_discard_counts = {}
+    scheduler.requests = {
+        "ready-spec": SimpleNamespace(is_prefill_chunk=False),
+        "partial-spec": SimpleNamespace(is_prefill_chunk=True),
+        "ready-plain": SimpleNamespace(is_prefill_chunk=False),
+    }
+    scheduler._widest_decode_batch_size = 0
+    output = SchedulerOutput.make_empty()
+    output.num_scheduled_tokens = {
+        "ready-spec": 4,
+        "partial-spec": 4,
+        "ready-plain": 4,
+    }
+
+    scheduler._finalize_scheduler_output(output, is_decode=False)
+
+    assert scheduler._pending_spec_seed_req_ids == {"ready-spec"}
+
+
 def test_decode_only_hides_the_opposing_lane_from_upstream(monkeypatch):
     scheduler = TTScheduler.__new__(TTScheduler)
     scheduler.policy = SchedulingPolicy.FCFS

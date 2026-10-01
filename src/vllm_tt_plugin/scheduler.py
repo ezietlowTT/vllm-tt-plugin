@@ -313,6 +313,11 @@ class TTScheduler(AsyncScheduler):
         self._request_spec_decode_lane: dict[str, str] = {}
         self._request_spec_decode_reason: dict[str, str] = {}
         self._last_spec_decode_lane: str | None = None
+        # A speculative request still owns its prompt GDN state in the shared
+        # target-model rows until its first verify step seeds the private
+        # speculative state. Do not let an opposing ordinary step advance a
+        # padded/HOLD copy of that row before the seed has happened.
+        self._pending_spec_seed_req_ids: set[str] = set()
         self.num_lookahead_tokens = max(
             self.num_lookahead_tokens,
             spec_lookahead_tokens(
@@ -767,11 +772,24 @@ class TTScheduler(AsyncScheduler):
             return result
 
         lanes = self._decode_lanes_with_work()
+        running_spec_ids = {
+            request.request_id
+            for request in self.running
+            if not request.is_prefill_chunk
+            and self._request_spec_decode_lane.get(
+                request.request_id, SPEC_DECODE_LANE_SPECULATIVE
+            )
+            == SPEC_DECODE_LANE_SPECULATIVE
+        }
+        pending_seed_ids = getattr(self, "_pending_spec_seed_req_ids", set())
+        pending_seed_ids.intersection_update(running_spec_ids)
         if not lanes:
             result = self._schedule_decode_only()
             set_tt_spec_decode_lane(result, None)
             return result
-        if len(lanes) == 1:
+        if pending_seed_ids:
+            lane = SPEC_DECODE_LANE_SPECULATIVE
+        elif len(lanes) == 1:
             lane = lanes[0]
         else:
             lane = (
@@ -782,6 +800,8 @@ class TTScheduler(AsyncScheduler):
         result = self._schedule_decode_only(lane)
         if result.total_num_scheduled_tokens:
             self._last_spec_decode_lane = lane
+            if lane == SPEC_DECODE_LANE_SPECULATIVE:
+                pending_seed_ids.difference_update(result.num_scheduled_tokens)
         set_tt_spec_decode_lane(result, lane)
         return result
 
@@ -791,6 +811,20 @@ class TTScheduler(AsyncScheduler):
         if not is_decode:
             set_tt_spec_decode_lane(scheduler_output, "prefill")
         request_lanes = getattr(self, "_request_spec_decode_lane", {})
+        if not is_decode:
+            pending_seed_ids = getattr(self, "_pending_spec_seed_req_ids", None)
+            if pending_seed_ids is None:
+                pending_seed_ids = self._pending_spec_seed_req_ids = set()
+            requests = getattr(self, "requests", {})
+            for req_id in scheduler_output.num_scheduled_tokens:
+                request = requests.get(req_id)
+                if (
+                    request is not None
+                    and not request.is_prefill_chunk
+                    and request_lanes.get(req_id, SPEC_DECODE_LANE_SPECULATIVE)
+                    == SPEC_DECODE_LANE_SPECULATIVE
+                ):
+                    pending_seed_ids.add(req_id)
         set_tt_request_spec_decode_lanes(
             scheduler_output,
             {
