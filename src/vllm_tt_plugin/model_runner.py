@@ -362,6 +362,9 @@ class TTModelRunner:
         # consumes them in _drafts_to_verify within the scheduled lookahead
         # reservation. Each consumer takes a proposal only once.
         self._proposed_draft_token_ids: dict[str, list[int]] = {}
+        # Rows a verify answered by argmax although their request is not
+        # speculable. See _note_unspeculable_verify_rows; reported at shutdown.
+        self._num_unspeculable_verify_rows = 0
         # Built on first use rather than here, because constructing it compiles
         # numba kernels and a launch that never speculates must not pay that.
         self._ngram_proposer: Any = None
@@ -397,6 +400,14 @@ class TTModelRunner:
         """
         if getattr(self, "_persistent_capture_released", False):
             return
+        unspeculable_rows = getattr(self, "_num_unspeculable_verify_rows", 0)
+        if unspeculable_rows:
+            logger.warning(
+                "Speculative verify steps committed a greedy token for %d "
+                "row(s) whose request is not speculable (non-zero temperature "
+                "or a penalty).",
+                unspeculable_rows,
+            )
         release = getattr(
             getattr(self, "model", None), "release_persistent_capture", None
         )
@@ -1365,6 +1376,71 @@ class TTModelRunner:
                 drafts[row, :valid] = torch.tensor(row_drafts, dtype=torch.int32)
         return drafts, num_valid, counts
 
+    def _publish_draft(self, req_id: str, tokens) -> None:
+        """Record this step's proposal for ``req_id``, or erase the last one.
+
+        Every proposer publishes through here so the speculability gate cannot
+        be bypassed by adding one: there is a single accept walk behind all of
+        them, and it certifies by id equality only.
+
+        Erasing on an empty offer is not optional. This map is what the
+        scheduler is told to verify next, so an entry nothing rewrote would be
+        verified against a token the request has already moved past.
+        """
+        if tokens and self._request_is_speculable(req_id):
+            self._proposed_draft_token_ids[req_id] = list(tokens)
+        else:
+            self._proposed_draft_token_ids.pop(req_id, None)
+
+    def _request_is_speculable(self, req_id: str) -> bool:
+        """False when this request's sampling cannot be certified by id equality.
+
+        ``accept_greedy_drafts`` compares token ids, so it can only certify a
+        greedy continuation. Anything that makes the target distribution differ
+        from argmax -- a non-zero temperature, or a penalty that reshapes the
+        logits -- has to be decoded ordinarily. top_p/top_k need no entry: they
+        only narrow a distribution that temperature 0 has already collapsed to a
+        point, so a greedy request carrying them is still greedy.
+        """
+        batch = self.input_batch
+        # getattr rather than attribute access: the gate has to stay total for
+        # any batch the runner is handed. A batch that tracks none of these
+        # sets has no sampled request to withhold drafts from, so the answer is
+        # the same as an empty set -- speculable.
+        for attr in (
+            "random_reqs",
+            "presence_penalties_reqs",
+            "frequency_penalties_reqs",
+            "repetition_penalties_reqs",
+        ):
+            if req_id in getattr(batch, attr, ()):
+                return False
+        return True
+
+    def _note_unspeculable_verify_rows(self, row_req_ids: list[str]) -> None:
+        """Count the live rows of a verify whose request is not speculable.
+
+        ``_publish_draft`` keeps drafts off such a request, but it cannot keep
+        the request out of a verify: another row's drafts, an unresolved
+        multi-token commit, or a model without ``supports_narrow_decode`` makes
+        the whole step one. A verify in ``argmax_ids`` mode answers every row
+        with the target's argmax, so the row commits that argmax, not a token
+        drawn with its request's temperature and penalties.
+        """
+        rows = sum(
+            1 for req_id in row_req_ids if not self._request_is_speculable(req_id)
+        )
+        if not rows:
+            return
+        self._num_unspeculable_verify_rows += rows
+        logger.warning_once(
+            "A speculative verify step included a request that is not "
+            "speculable (non-zero temperature or a penalty). A verify returns "
+            "the target argmax for every row, so on that step the request "
+            "committed the argmax and its temperature and penalties were not "
+            "applied. The total count is logged at shutdown."
+        )
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         """Hand the drafts proposed since the last call to the engine.
 
@@ -1421,14 +1497,10 @@ class TTModelRunner:
             self.input_batch.token_ids_cpu,
         )
         for req_id, row_drafts in zip(row_req_ids, drafts):
-            if row_drafts:
-                self._proposed_draft_token_ids[req_id] = list(row_drafts)
-            else:
-                # A row the proposer found no repeat for drafts nothing this
-                # step, and the entry from an earlier step is not this step's
-                # answer: the drafts it holds continue a token the request has
-                # already moved past.
-                self._proposed_draft_token_ids.pop(req_id, None)
+            # A row the proposer found no repeat for drafts nothing this step,
+            # and a request whose sampling the accept walk cannot certify is
+            # not drafted for at all; _publish_draft handles both by erasing.
+            self._publish_draft(req_id, row_drafts)
 
     def _propose_model_drafts(
         self,
@@ -1586,22 +1658,27 @@ class TTModelRunner:
             batch_row = self.input_batch.req_id_to_index.get(req_id)
             if batch_row is None:
                 continue
+            # A request whose sampling the accept walk cannot arbitrate is
+            # served WITHOUT speculation rather than refused. The walk compares
+            # token ids and never sees logits, so it can only certify a greedy
+            # continuation; proposing for a sampled request and accepting on id
+            # equality would silently return greedy text for a request that
+            # asked to sample. Offering nothing instead routes the request down
+            # the ordinary decode path, where the runner applies the full
+            # sampling it already implements (temperature, top_p/top_k, the
+            # penalties, seeds), so the caller gets what it asked for at
+            # baseline speed. Lossless speculation for these requests needs the
+            # target probabilities (rejection sampling), not this walk.
+
             # Trimmed to what the request can still hold, the way the host
             # proposer trims itself. Drafts past ``max_model_len`` would be
             # verified and then dropped at the commit.
             room = max_model_len - int(self.input_batch.num_tokens[batch_row])
             row_offered = num_drafts if offered is None else int(offered[row])
             usable = max(0, min(row_offered, room))
-            if usable:
-                self._proposed_draft_token_ids[req_id] = [
-                    int(token) for token in draft_token_ids[row, :usable]
-                ]
-            else:
-                # Offering nothing has to erase the last offer, not leave it
-                # standing: this map is what the scheduler is told to verify
-                # next, and an entry nothing rewrote would be verified against
-                # a token it was never drafted from.
-                self._proposed_draft_token_ids.pop(req_id, None)
+            self._publish_draft(
+                req_id, [int(token) for token in draft_token_ids[row, :usable]]
+            )
 
     @staticmethod
     def _committed_positions(input_positions: torch.Tensor, width: int) -> torch.Tensor:
@@ -1885,6 +1962,7 @@ class TTModelRunner:
                     accepted_counts,
                     len(row_req_ids),
                 ):
+                    self._note_unspeculable_verify_rows(row_req_ids)
                     # Uniformly 1+K wide, so a model needs one verify shape
                     # rather than two.
                     input_tokens, input_positions = self._spec_candidate_block(
