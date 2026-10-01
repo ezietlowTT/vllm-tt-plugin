@@ -271,7 +271,8 @@ def _speculating_platform(monkeypatch, vllm_config):
 
 
 def test_a_greedy_request_is_served_while_speculating(monkeypatch, vllm_config):
-    _speculating_platform(monkeypatch, vllm_config)
+    platform = _speculating_platform(monkeypatch, vllm_config)
+    assert platform.supports_per_request_spec_decode_fallback()
     _validate(_greedy_params())
 
 
@@ -310,6 +311,9 @@ def test_an_ordinary_request_is_refused_when_the_model_has_no_narrow_path(
 
     model = make_fake_spec_model(max_supported_num_seqs=4, supports_narrow_decode=False)
     _run_hook(monkeypatch, _speculative(vllm_config), model)
+    from vllm_tt_plugin.platform import TTPlatform
+
+    assert not TTPlatform.supports_per_request_spec_decode_fallback()
     with pytest.raises(ValueError, match="supports_narrow_decode"):
         _validate(SamplingParams(temperature=0.7))
 

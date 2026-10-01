@@ -2416,6 +2416,13 @@ class TTPlatform(Platform):
         )
 
     @classmethod
+    def supports_per_request_spec_decode_fallback(cls) -> bool:
+        """Advertise ordinary-lane fallback only for an admitted lane plan."""
+        vllm_config = cls._resolve_tt_admission_handle()
+        plan = get_tt_spec_plan(vllm_config) if vllm_config is not None else None
+        return bool(plan is not None and plan.supports_narrow_decode)
+
+    @classmethod
     def validate_request(
         cls,
         processed_inputs: "EngineInput",
