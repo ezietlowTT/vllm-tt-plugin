@@ -12,6 +12,7 @@ adapter must provide.
 | Task | Reference |
 |---|---|
 | Register an adapter, construct the model, size and allocate KV storage | [Model setup](MODEL_SETUP.md) |
+| Declare recurrent state through `MambaSpec` and address its blocks | [Recurrent state](MODEL_SETUP.md#recurrent-state-mambaspec), [state blocks](MODEL_EXECUTION.md#recurrent-state-blocks), [block operations](MODEL_LIFECYCLE.md#kv-cache-block-operations) |
 | Implement prefill, decode, sampling, and output conversion | [Model execution](MODEL_EXECUTION.md) |
 | Prepare traces and manage request state and shutdown | [Model lifecycle](MODEL_LIFECYCLE.md) |
 | Declare optional behavior and understand admission limits | [Model capabilities](MODEL_CAPABILITIES.md) |
@@ -60,6 +61,10 @@ A model that declares `tt_plain_fallback` also receives each row's lane:
 `request_execution_lanes` on `prefill_forward` and `execution_lane` on
 `decode_forward` ([execution](MODEL_EXECUTION.md)). No other model receives
 either keyword.
+
+An adapter that declares recurrent state through `MambaSpec` also needs
+`allocate_kv_cache_per_layer` and the block hooks `zero_kv_cache_blocks` and,
+with prefix caching, `copy_kv_cache_blocks`.
 
 The execution page specifies when `read_decode_output` and
 `process_decode_output_host` are needed. Add extension hooks only with the

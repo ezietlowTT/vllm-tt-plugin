@@ -138,6 +138,7 @@ def test_submit_prefill_forwards_lanes_only_when_built(lanes):
         prompt_lens=[1, 1],
         input_positions=torch.zeros((2,), dtype=torch.int32),
         block_tables_per_layer=None,
+        state_block_ids_per_layer=None,
         stage_inputs=None,
         multi_modal_kwargs={},
         perform_device_sampling=False,
