@@ -22,6 +22,7 @@ from vllm_tt_plugin.config import (
     get_tt_output_tokens_per_step,
     get_tt_prefill_chunk_alignment,
     get_tt_spec_plan,
+    has_tt_dflash_sampled,
     has_tt_plain_fallback,
     is_tt_adaptive_block_batched,
     is_tt_adaptive_block_output_model,
@@ -396,7 +397,10 @@ class TTScheduler(AsyncScheduler):
         self._requests_cannot_resume = tt_requests_cannot_resume(self.vllm_config)
         self._block_output_multimodal = is_tt_block_output_multimodal(self.vllm_config)
         # tt_plain_fallback: each request's admission-pinned execution lane.
-        self._lane_router = TTLaneRouter(has_tt_plain_fallback(self.vllm_config))
+        self._lane_router = TTLaneRouter(
+            has_tt_plain_fallback(self.vllm_config),
+            sampled_dflash=has_tt_dflash_sampled(self.vllm_config),
+        )
         # Adaptive: emit the block only on a solo decode step; batch >1 decodes
         # as plain baseline. Lets max_num_seqs>1 coexist with block-output.
         self._is_adaptive_block = is_tt_adaptive_block_output_model(self.vllm_config)

@@ -29,6 +29,7 @@ def test_readback_requires_capability_and_independent_scheduled_rows(
 
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         model=SimpleNamespace(
             model_capabilities={"supports_compact_host_logits": capability},
             process_decode_output_host=readback,
@@ -156,6 +157,7 @@ def test_selective_readback_captures_rows_before_transfer(
             request_specific_rope=False,
             supports_stage_outputs=False,
             _plain_fallback=False,
+            _dflash_sampled=False,
             lane_batch=SimpleNamespace(can_compact_host_sampling=lambda: independent),
         )
     )
@@ -236,6 +238,7 @@ def test_legacy_adapter_keeps_full_slots_through_async_readback(
             request_specific_rope=False,
             supports_stage_outputs=False,
             _plain_fallback=False,
+            _dflash_sampled=False,
             lane_batch=SimpleNamespace(can_compact_host_sampling=lambda: True),
         )
     )

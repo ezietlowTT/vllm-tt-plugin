@@ -37,6 +37,7 @@ from vllm_tt_plugin.config import (
     store_tt_adaptive_block_ragged,
     store_tt_block_kv_extent_tokens,
     store_tt_block_output_multimodal,
+    store_tt_dflash_sampled,
     store_tt_lane_count,
     store_tt_output_tokens_per_step,
     store_tt_plain_fallback,
@@ -51,6 +52,7 @@ from vllm_tt_plugin.config import (
 from vllm_tt_plugin.lane_routing import (
     TT_EXECUTION_LANE_PLAIN,
     block_output_request_lane,
+    keeps_dflash_presence_penalty,
 )
 from vllm_tt_plugin.logger import init_tt_logger
 from vllm_tt_plugin.spec_admission import (
@@ -1020,7 +1022,7 @@ def _pin_v1_model_runner() -> None:
 
 
 def _neutralize_model_owned_sampling(
-    params, *, keep_transport_controls: bool = False
+    params, *, keep_transport_controls: bool = False, keep_presence_penalty=False
 ) -> list[str]:
     """Reset HTTP sampling controls on the cloned per-request SamplingParams.
 
@@ -1031,6 +1033,9 @@ def _neutralize_model_owned_sampling(
     ``keep_transport_controls`` keeps temperature, top_p, top_k and seed: a
     ``tt_plain_fallback`` dflash-lane request's anchor is sampled by vLLM's
     sampler with them. min_p and the penalties are still reset.
+
+    ``keep_presence_penalty`` keeps a ``tt_dflash_sampled`` request's presence
+    penalty, which the model applies inside its rejection sampler.
     """
     ignored = []
     if not keep_transport_controls:
@@ -1049,7 +1054,7 @@ def _neutralize_model_owned_sampling(
     if params.min_p != 0.0:
         ignored.append(f"min_p={params.min_p!r}")
         params.min_p = 0.0
-    if params.presence_penalty != 0.0:
+    if params.presence_penalty != 0.0 and not keep_presence_penalty:
         ignored.append(f"presence_penalty={params.presence_penalty!r}")
         params.presence_penalty = 0.0
     if params.frequency_penalty != 0.0:
@@ -1119,7 +1124,11 @@ def _install_tt_input_processor_patch() -> None:
         # steps are sampled with its own controls (a greedy request stays
         # greedy); only its block steps are model-owned.
         ignored = _neutralize_model_owned_sampling(
-            cloned_params, keep_transport_controls=lane is not None
+            cloned_params,
+            keep_transport_controls=lane is not None,
+            keep_presence_penalty=keeps_dflash_presence_penalty(
+                self.vllm_config, cloned_params
+            ),
         )
         if ignored:
             logger.warning_once(
@@ -2134,6 +2143,14 @@ class TTPlatform(Platform):
         if plain_fallback and not adaptive_block_batched:
             raise ValueError("tt_plain_fallback requires tt_adaptive_block_batched")
         store_tt_plain_fallback(vllm_config, plain_fallback)
+        # Sampled DFlash: temperature > 0 requests may take the dflash lane,
+        # where the model samples losslessly (exact rejection sampling).
+        dflash_sampled = bool(
+            (model_capabilities or {}).get("tt_dflash_sampled", False)
+        )
+        if dflash_sampled and not plain_fallback:
+            raise ValueError("tt_dflash_sampled requires tt_plain_fallback")
+        store_tt_dflash_sampled(vllm_config, dflash_sampled)
         # Optional prompt-length frontier for the adaptive block path: prompts
         # above it are served as plain baseline by the model, so the scheduler
         # must reserve width-1 for them (see TTScheduler). 0 = no limit.

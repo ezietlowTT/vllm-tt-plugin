@@ -186,6 +186,7 @@ def test_runner_commits_a_full_block_for_every_row():
         _is_adaptive_block_output=True,
         _is_adaptive_block_ragged=False,
         _plain_fallback=False,
+        _dflash_sampled=False,
         input_batch=SimpleNamespace(
             num_reqs=2,
             req_ids=["a", "b"],

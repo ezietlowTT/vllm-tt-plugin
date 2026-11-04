@@ -9,7 +9,8 @@ with ordinary one-token decode instead. Each request is classified once, at
 admission, onto one of two lanes and keeps it for life:
 
 - ``dflash``: greedy with no control the model-owned block sampler cannot
-  reproduce; decodes in blocks;
+  reproduce (with ``tt_dflash_sampled``, also temperature > 0 with top-k,
+  top-p, seed and a non-negative presence penalty); decodes in blocks;
 - ``plain``: anything else; decodes one host- or device-sampled token per step
   with every control intact.
 
@@ -19,7 +20,7 @@ alternating when both have work) and tags every step with its lane.
 
 from typing import TYPE_CHECKING, Any
 
-from vllm_tt_plugin.config import has_tt_plain_fallback
+from vllm_tt_plugin.config import has_tt_dflash_sampled, has_tt_plain_fallback
 from vllm_tt_plugin.logger import init_tt_logger
 
 if TYPE_CHECKING:
@@ -39,19 +40,27 @@ TT_EXECUTION_LANE_ATTR = "_tt_execution_lane"
 TT_REQUEST_EXECUTION_LANES_ATTR = "_tt_request_execution_lanes"
 
 
-def classify_tt_execution_lane(params: Any) -> tuple[str, str]:
+def classify_tt_execution_lane(
+    params: Any, *, sampled_dflash: bool = False
+) -> tuple[str, str]:
     """Return ``(lane, reason)`` for one request's sampling params.
 
     ``dflash`` needs a one-choice greedy request whose every response control
     is neutral; any control that needs host logits, per-token probabilities,
     grammar masking or history penalties routes to ``plain`` with that control
-    intact. The reason lists the offending fields (operator telemetry only).
+    intact. With ``sampled_dflash`` (``tt_dflash_sampled``) a temperature > 0
+    request with a non-negative presence penalty is also ``dflash``: the model
+    samples it, and applies the presence penalty, itself. The reason lists the
+    offending fields (operator telemetry only).
     """
     incompatible: list[str] = []
+    sampled = sampled_dflash and params.temperature > 0.0
     if params.n != 1:
         incompatible.append("n")
-    if params.temperature != 0.0:
+    if params.temperature != 0.0 and not sampled:
         incompatible.append("temperature")
+    if sampled and params.presence_penalty < 0.0:
+        incompatible.append("presence_penalty")
     for field, neutral in (
         ("presence_penalty", 0.0),
         ("frequency_penalty", 0.0),
@@ -59,6 +68,8 @@ def classify_tt_execution_lane(params: Any) -> tuple[str, str]:
         ("min_p", 0.0),
         ("min_tokens", 0),
     ):
+        if field == "presence_penalty" and sampled:
+            continue  # model-owned on the sampled DFlash path (sign checked above)
         if getattr(params, field) != neutral:
             incompatible.append(field)
     for field in (
@@ -76,6 +87,8 @@ def classify_tt_execution_lane(params: Any) -> tuple[str, str]:
         incompatible.append("bad_words")
     if incompatible:
         return TT_EXECUTION_LANE_PLAIN, ",".join(incompatible)
+    if sampled:
+        return TT_EXECUTION_LANE_DFLASH, "eligible_sampled"
     return TT_EXECUTION_LANE_DFLASH, "eligible_greedy"
 
 
@@ -85,8 +98,21 @@ def block_output_request_lane(vllm_config: "VllmConfig | None", params) -> str |
     """
     if vllm_config is None or not has_tt_plain_fallback(vllm_config):
         return None
-    lane, _ = classify_tt_execution_lane(params)
+    lane, _ = classify_tt_execution_lane(
+        params, sampled_dflash=has_tt_dflash_sampled(vllm_config)
+    )
     return lane
+
+
+def keeps_dflash_presence_penalty(vllm_config: "VllmConfig", params) -> bool:
+    """Whether a request's presence penalty is model-owned: a sampled request
+    on a ``tt_dflash_sampled`` model's dflash lane, whose rejection sampler
+    applies it over the model's own output history."""
+    return (
+        params.temperature > 0.0
+        and params.presence_penalty > 0.0
+        and block_output_request_lane(vllm_config, params) == TT_EXECUTION_LANE_DFLASH
+    )
 
 
 def get_tt_execution_lane(scheduler_output: "SchedulerOutput") -> str | None:
@@ -128,8 +154,9 @@ class TTLaneRouter:
     decode steps nor tags them.
     """
 
-    def __init__(self, enabled: bool):
+    def __init__(self, enabled: bool, *, sampled_dflash: bool = False):
         self.enabled = enabled
+        self.sampled_dflash = sampled_dflash
         self._lanes: dict[str, str] = {}
         self._last_decode_lane: str | None = None
 
@@ -137,7 +164,9 @@ class TTLaneRouter:
         """Classify a new request onto its lane for life and return the lane."""
         if not self.enabled:
             return TT_EXECUTION_LANE_DFLASH
-        lane, reason = classify_tt_execution_lane(request.sampling_params)
+        lane, reason = classify_tt_execution_lane(
+            request.sampling_params, sampled_dflash=self.sampled_dflash
+        )
         self._lanes[request.request_id] = lane
         logger.info(
             "TT request %s routed to the %s lane (%s)",

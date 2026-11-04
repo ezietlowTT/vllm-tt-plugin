@@ -52,6 +52,7 @@ from vllm_tt_plugin.config import (
     get_tt_supports_device_grammar,
     get_tt_supports_stage_inputs,
     get_tt_supports_stage_outputs,
+    has_tt_dflash_sampled,
     has_tt_plain_fallback,
     is_tt_adaptive_block_output_model,
     is_tt_adaptive_block_ragged,
@@ -87,6 +88,7 @@ from vllm_tt_plugin.model_input import (
     slice_tt_sampling_params,
 )
 from vllm_tt_plugin.platform import TTPlatform
+from vllm_tt_plugin.scheduler import get_tt_block_step_decisions
 from vllm_tt_plugin.spec_accept import accept_sampled_drafts, spec_sampling_inputs
 from vllm_tt_plugin.spec_admission import method_requirements
 from vllm_tt_plugin.spec_decode import (
@@ -370,6 +372,9 @@ class TTModelRunner:
         self._is_adaptive_block_ragged = is_tt_adaptive_block_ragged(vllm_config)
         # tt_plain_fallback: plain-lane requests keep logprobs and host sampling.
         self._plain_fallback = has_tt_plain_fallback(vllm_config)
+        # tt_dflash_sampled: a sampled dflash request's presence penalty is
+        # applied by the model over its own output history.
+        self._dflash_sampled = has_tt_dflash_sampled(vllm_config)
         self._device_grammar_poisoned = False
 
         # Resolved and validated by the platform's config-time admission;
@@ -2652,7 +2657,11 @@ class TTModelRunner:
         output_tokens = None
         if input_batch.sampling.bad_words_token_ids and not is_prompt:
             output_tokens = input_batch.make_output_token_ids_tensor(req_indices)
-        if (not input_batch.no_penalties) and not is_prompt:
+        if (
+            not input_batch.no_penalties
+            and not is_prompt
+            and not self._block_step_owns_penalties(scheduler_output)
+        ):
             # Restrict to this build's requests. For lane builds ``req_indices``
             # selects one lane's rows out of the merged batch; passing them
             # keeps penalty history attributed to the right requests instead of
@@ -3950,6 +3959,19 @@ class TTModelRunner:
             return None
         finish = self._pending_samples.popleft()
         return finish(grammar_output)
+
+    def _block_step_owns_penalties(self, scheduler_output: SchedulerOutput) -> bool:
+        """Whether every row of this decode step is a ``tt_dflash_sampled``
+        block step, whose model applies the presence penalty from its own
+        session history and never reads the O(context) prompt/output token
+        tensors, so the runner need not build them."""
+        if not self._dflash_sampled:
+            return False
+        decisions = get_tt_block_step_decisions(scheduler_output)
+        return bool(scheduler_output.num_scheduled_tokens) and all(
+            decisions.get(req_id, False)
+            for req_id in scheduler_output.num_scheduled_tokens
+        )
 
     def check_perform_device_sampling(
         self,

@@ -343,6 +343,30 @@ def store_tt_plain_fallback(vllm_config: "VllmConfig", flag: bool) -> None:
 
 
 # Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
+_DFLASH_SAMPLED_KEY = "_tt_dflash_sampled"
+
+
+def has_tt_dflash_sampled(vllm_config: "VllmConfig") -> bool:
+    """Whether sampled requests may be classified onto the DFlash lane.
+
+    A ``tt_plain_fallback`` model declaring ``tt_dflash_sampled`` serves
+    ``temperature > 0`` requests (top-k, top-p, seed, non-negative presence
+    penalty) on its block path by exact rejection sampling; without it every
+    sampled request takes the plain lane.
+    """
+    return _read_tt_internal_flag(vllm_config, _DFLASH_SAMPLED_KEY)
+
+
+def store_tt_dflash_sampled(vllm_config: "VllmConfig", flag: bool) -> None:
+    """Record the model's ``tt_dflash_sampled`` capability.
+
+    Internal platform-to-runtime handoff, validated by
+    ``TTPlatform.check_and_update_config`` against ``tt_plain_fallback``.
+    """
+    _store_tt_internal_flag(vllm_config, _DFLASH_SAMPLED_KEY, flag)
+
+
+# Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
 _ADAPTIVE_BLOCK_MAX_PROMPT_KEY = "_tt_adaptive_block_max_prompt_tokens"
 
 

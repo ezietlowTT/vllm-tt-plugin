@@ -69,6 +69,7 @@ def _runner(*, supports_stage_inputs: bool) -> SimpleNamespace:
         _is_adaptive_block_output=False,
         _is_adaptive_block_ragged=False,
         _plain_fallback=False,
+        _dflash_sampled=False,
         _num_speculative_tokens=0,
         async_decode_scheduling=False,
         _spec_method=None,

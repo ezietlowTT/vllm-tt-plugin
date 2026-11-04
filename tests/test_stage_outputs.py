@@ -97,6 +97,7 @@ def _controller(prompt_lens, model=None):
     model = model or _StageModel()
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         model=model,
         trace_mode="decode_only",
         kv_caches=object(),
@@ -178,6 +179,7 @@ def test_prefill_never_asks_for_stage_outputs():
 
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         kv_caches=object(),
         trace_mode="none",
         request_specific_rope=False,
@@ -227,6 +229,7 @@ def test_the_sync_path_publishes_the_frame_of_a_step_that_samples_eos():
                 _tt_committed_width=len,
                 _is_adaptive_block_ragged=False,
                 _plain_fallback=False,
+                _dflash_sampled=False,
             ),
             sampled,
             logprobs,
@@ -235,6 +238,7 @@ def test_the_sync_path_publishes_the_frame_of_a_step_that_samples_eos():
 
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         _apply_grammar_to_input=lambda model_input, grammar, lane_total: model_input,
         _sample_sync_forward=lambda fwd: ([torch.tensor([[EOS]])], []),
         scheduler_config=SimpleNamespace(async_scheduling=False),
@@ -252,6 +256,7 @@ def test_the_sync_path_publishes_the_frame_of_a_step_that_samples_eos():
 def test_preempting_a_stage_request_fails_loudly():
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         supports_stage_outputs=True,
         requests={"a": object()},
         encoder_cache={},

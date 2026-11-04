@@ -42,6 +42,7 @@ from vllm_tt_plugin.config import (
     store_tt_adaptive_block_ragged,
     store_tt_block_kv_extent_tokens,
     store_tt_block_output_multimodal,
+    store_tt_dflash_sampled,
     store_tt_output_tokens_per_step,
     store_tt_plain_fallback,
 )
@@ -104,6 +105,7 @@ def _scheduler(
     ragged: bool = False,
     multimodal: bool = False,
     plain_fallback: bool = False,
+    dflash_sampled: bool = False,
     max_prompt: int = 0,
 ) -> TTScheduler:
     model_config = ModelConfig(
@@ -160,6 +162,8 @@ def _scheduler(
         store_tt_block_output_multimodal(config, True)
     if plain_fallback:
         store_tt_plain_fallback(config, True)
+    if dflash_sampled:
+        store_tt_dflash_sampled(config, True)
     if max_prompt:
         store_tt_adaptive_block_max_prompt_tokens(config, max_prompt)
     if kv_extent:

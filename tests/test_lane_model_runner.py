@@ -68,6 +68,7 @@ def _host_runner(captured: dict) -> SimpleNamespace:
     the well-formed shapes these tests use stay well-formed."""
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         host_sampler=_capturing_host_sampler(captured),
         model=SimpleNamespace(),
         vocab_size=VOCAB,
@@ -301,6 +302,7 @@ def test_extract_output_skips_all_intermediate_prefill_rows():
     batch = _lane_batch()
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         host_sampler=lambda *args, **kwargs: pytest.fail("sampler must not run"),
     )
     model_input = SimpleNamespace(
@@ -345,6 +347,7 @@ def test_build_host_generators_preserves_intermediate_request_rng():
 def test_get_output_tokens_skips_all_intermediate_prefill_rows():
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         host_sampler=lambda *args, **kwargs: pytest.fail("sampler must not run"),
         _is_block_output_model=False,
         _num_speculative_tokens=0,
@@ -383,6 +386,7 @@ def test_finish_lane_sync_suppresses_intermediate_prefill_output():
 
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         _apply_grammar_to_input=lambda model_input,
         grammar_output,
         *,
@@ -432,6 +436,7 @@ def test_submit_prefill_forwards_plan_empty_slots_to_model():
 
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         kv_caches=object(),
         trace_mode="none",
         request_specific_rope=False,
@@ -488,6 +493,7 @@ def test_submit_decode_forwards_slot_remap_to_model(perform_device_sampling):
 
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         kv_caches=object(),
         trace_mode="none",
         request_specific_rope=False,

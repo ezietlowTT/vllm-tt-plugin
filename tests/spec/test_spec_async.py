@@ -389,6 +389,7 @@ def _runner(model: DeferredVerifyTarget) -> SimpleNamespace:
         _is_adaptive_block_output=False,
         _is_adaptive_block_ragged=False,
         _plain_fallback=False,
+        _dflash_sampled=False,
         _num_speculative_tokens=DRAFT_LEN,
         _spec_method=None,
         _spec_supports_narrow_decode=False,

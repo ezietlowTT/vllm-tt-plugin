@@ -114,6 +114,7 @@ def _host_runner(host_sampler=None, *, vocab=VOCAB, **attrs):
     the well-formed shapes these tests use stay well-formed."""
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         host_sampler=host_sampler,
         model=SimpleNamespace(),
         vocab_size=vocab,
@@ -343,6 +344,7 @@ def test_lane_prefill_input_ends_at_scheduled_chunk_boundary(monkeypatch):
             check_perform_device_sampling=lambda **_: True,
             _output_tokens_per_step=1,
             _plain_fallback=False,
+            _dflash_sampled=False,
             model_config=SimpleNamespace(is_multimodal_model=False),
             requests={"request": request},
         )
@@ -1071,6 +1073,7 @@ def test_lane_top_k_uses_rows_in_submitted_step(scheduled_top_k, is_decode):
     )
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         input_batch=batch,
         sample_on_device_mode="all",
         seeded_sampling_policy="auto",

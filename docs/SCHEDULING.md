@@ -472,9 +472,10 @@ serves two request classes. `TTScheduler.add_request` classifies every request
 once (`lane_routing.classify_tt_execution_lane`) and `TTLaneRouter` keeps the
 lane for the request's life:
 
-- `dflash`: greedy with only neutral host controls; its decode steps are block
-  steps, and it gets the block-request repair (whole-canvas `max_tokens`
-  clamp, control strip);
+- `dflash`: greedy with only neutral host controls (with `tt_dflash_sampled`,
+  also sampled with top-k, top-p, seed and a non-negative presence penalty);
+  its decode steps are block steps, and it gets the block-request repair
+  (whole-canvas `max_tokens` clamp, control strip);
 - `plain`: anything else; it decodes one token per step, keeps its controls
   and `max_tokens`, and its prompt is truncated only to leave room for one
   token.

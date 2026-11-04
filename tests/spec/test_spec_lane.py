@@ -99,6 +99,7 @@ def _lane_runner(
         _is_adaptive_block_output=False,
         _is_adaptive_block_ragged=False,
         _plain_fallback=False,
+        _dflash_sampled=False,
         _num_speculative_tokens=DRAFT_LEN,
         # What the stand-in's spec_plan publishes, read off its class.
         _spec_accept_modes=tuple(type(model).accept_modes),

@@ -100,6 +100,7 @@ def _fake_runner(
 ) -> SimpleNamespace:
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         input_batch=batch,
         requests=requests,
         _output_tokens_per_step=1,
@@ -831,6 +832,7 @@ def test_the_runner_only_truncates_a_proposal_before_the_verify():
 
     runner = SimpleNamespace(
         _plain_fallback=False,
+        _dflash_sampled=False,
         async_decode_scheduling=True,
         _proposed_draft_token_ids={"a": [21, 22, 23, 24, 25], "b": [31, 32]},
     )

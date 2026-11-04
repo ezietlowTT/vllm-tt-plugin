@@ -57,6 +57,7 @@ def _runner(captured: dict, *, vocab: int = VOCAB) -> SimpleNamespace:
         _is_adaptive_block_output=False,
         _is_adaptive_block_ragged=False,
         _plain_fallback=False,
+        _dflash_sampled=False,
         tt_per_lane_max_num_seqs=SLOT_ROWS,
         vocab_size=vocab,
         model=FakeTTGenerator(),
