@@ -34,9 +34,11 @@ def _bind_committed_width(runner: SimpleNamespace) -> SimpleNamespace:
     ``_apply_sampled_tokens_to_state`` / ``_build_runner_output`` /
     ``_get_output_tokens`` resolve the step's committed width through
     ``_tt_committed_width`` (reads ``_is_adaptive_block_output`` and
-    ``_output_tokens_per_step``). These fakes are non-adaptive block-output.
+    ``_output_tokens_per_step``) and the ragged row parse (reads
+    ``_is_adaptive_block_ragged``). These fakes are non-adaptive block-output.
     """
     runner._is_adaptive_block_output = False
+    runner._is_adaptive_block_ragged = False
     runner._tt_committed_width = lambda toks: TTModelRunner._tt_committed_width(
         runner, toks
     )
@@ -615,6 +617,7 @@ class _WidthRunnerStub:
 
     def __init__(self, adaptive: bool, width: int):
         self._is_adaptive_block_output = adaptive
+        self._is_adaptive_block_ragged = False
         self._output_tokens_per_step = width
 
 

@@ -258,6 +258,42 @@ def store_tt_adaptive_block_batched(vllm_config: "VllmConfig", flag: bool) -> No
 
 
 # Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
+_ADAPTIVE_BLOCK_RAGGED_KEY = "_tt_adaptive_block_ragged"
+
+# Row padding of a ragged block: every row of the rectangular
+# ``[num_reqs, output_tokens_per_step]`` step output carries ``1..W`` real
+# token ids followed by this value. Token ids are never negative.
+TT_RAGGED_BLOCK_PAD_TOKEN_ID = -1
+
+
+def is_tt_adaptive_block_ragged(vllm_config: "VllmConfig") -> bool:
+    """Whether a batched adaptive block model commits RAGGED per-request widths.
+
+    Under ``tt_adaptive_block_batched`` every request of a block step commits
+    exactly ``W = output_tokens_per_step`` tokens, so a request whose
+    speculation accepted fewer must wait for a full block. A model declaring
+    ``tt_adaptive_block_ragged`` delivers each request's tokens as produced: a
+    block step still returns one rectangular int32 ``[num_reqs, W]`` tensor,
+    but row ``i`` holds ``1 <= n_i <= W`` real ids followed by
+    ``TT_RAGGED_BLOCK_PAD_TOKEN_ID``. ``TTModelRunner`` strips the padding and
+    commits ``n_i`` ids; ``TTScheduler`` accepts ``1..W`` ids per request but
+    still consumes the whole ``W`` placeholder reservation, so computed tokens
+    advance by ``n_i`` while each step reserves ``W``. Prefill anchors stay
+    width 1. Requires ``tt_adaptive_block_batched``.
+    """
+    return _read_tt_internal_flag(vllm_config, _ADAPTIVE_BLOCK_RAGGED_KEY)
+
+
+def store_tt_adaptive_block_ragged(vllm_config: "VllmConfig", flag: bool) -> None:
+    """Record the model's ``tt_adaptive_block_ragged`` capability.
+
+    Internal platform-to-runtime handoff, validated by
+    ``TTPlatform.check_and_update_config`` against ``tt_adaptive_block_batched``.
+    """
+    _store_tt_internal_flag(vllm_config, _ADAPTIVE_BLOCK_RAGGED_KEY, flag)
+
+
+# Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
 _ADAPTIVE_BLOCK_MAX_PROMPT_KEY = "_tt_adaptive_block_max_prompt_tokens"
 
 

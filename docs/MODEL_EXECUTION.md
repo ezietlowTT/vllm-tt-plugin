@@ -176,7 +176,9 @@ reaches it anyway.
    `[B, output_tokens_per_step]`; adaptive block
    execution also permits one-token prefill and batched decode outputs. With
    `tt_adaptive_block_batched`, a batched decode step returns
-   `[B, output_tokens_per_step]` too: a full block for every row.
+   `[B, output_tokens_per_step]` too: a full block for every row. With
+   `tt_adaptive_block_ragged`, each row of a block step carries its own
+   `1..output_tokens_per_step` real ids followed by `-1` padding.
 
 Here `S` is the returned sequence dimension; the front-packed sampler uses
 only position `S - 1`. Lane-DP host extraction also accepts `[B, V]` logits.

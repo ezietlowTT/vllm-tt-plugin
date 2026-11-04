@@ -24,6 +24,7 @@ from vllm_tt_plugin.config import (
     get_tt_spec_plan,
     is_tt_adaptive_block_batched,
     is_tt_adaptive_block_output_model,
+    is_tt_adaptive_block_ragged,
     is_tt_block_output_model,
     tt_requests_cannot_resume,
 )
@@ -388,6 +389,17 @@ class TTScheduler(AsyncScheduler):
         # Batched adaptive: one speculative session per request, so a decode
         # step is a block step for every request in it, not only a solo one.
         self._adaptive_block_batched = is_tt_adaptive_block_batched(self.vllm_config)
+        # Ragged batched: a block step commits 1..W tokens per request; the
+        # reservation stays W per step. See _update_request_with_output.
+        self._adaptive_block_ragged = is_tt_adaptive_block_ragged(self.vllm_config)
+        if self._adaptive_block_ragged and not (
+            self._is_adaptive_block and self._adaptive_block_batched
+        ):
+            raise ValueError(
+                "tt_adaptive_block_ragged requires tt_adaptive_block_batched "
+                f"(adaptive={self._is_adaptive_block}, "
+                f"batched={self._adaptive_block_batched})"
+            )
         # Prompt-length frontier for the block path (0 = none): a longer prompt
         # is served as plain baseline by the model for its whole lifetime, so
         # its steps reserve width-1 even when solo.
@@ -1337,10 +1349,28 @@ class TTScheduler(AsyncScheduler):
                 "block-output frames cannot be discarded (reset/preempt of a "
                 "running block request is unsupported)"
             )
-        if len(new_token_ids) != self._output_tokens_per_step:
+        width = len(new_token_ids)
+        if self._adaptive_block_ragged:
+            # Ragged block step: the runner already stripped the row's
+            # padding, so this is the request's own committed width n. Any n in
+            # 1..W is a valid block; a pad id here means the runner did not
+            # strip it (or the model padded mid-row).
+            if not 1 <= width <= self._output_tokens_per_step:
+                raise ValueError(
+                    "Model output width violates output_tokens_per_step "
+                    f"(ragged block): {width} not in "
+                    f"1..{self._output_tokens_per_step} "
+                    f"(req_id={request.request_id!r})"
+                )
+            if any(token_id < 0 for token_id in new_token_ids):
+                raise ValueError(
+                    "Ragged block output reached the scheduler with padding: "
+                    f"{new_token_ids} (req_id={request.request_id!r})"
+                )
+        elif width != self._output_tokens_per_step:
             raise ValueError(
                 "Model output width violates output_tokens_per_step: "
-                f"{len(new_token_ids)} != {self._output_tokens_per_step} "
+                f"{width} != {self._output_tokens_per_step} "
                 f"(req_id={request.request_id!r}); the scheduler reserved a "
                 "block but the model returned a different width -- the "
                 "scheduler and model block gates disagree"
@@ -1352,6 +1382,16 @@ class TTScheduler(AsyncScheduler):
         # Calling Scheduler directly intentionally skips AsyncScheduler's
         # cache_blocks hook. Platform validation disables prefix caching for
         # block-output models, and __init__ asserts that invariant.
+        #
+        # A ragged block consumes the SAME whole-W reservation although only n
+        # tokens landed: the placeholders are the per-step reservation, and
+        # the request's computed tokens advance by n on their own. The base
+        # running loop schedules ``num_tokens + placeholders - num_computed``
+        # next step; with placeholders back at 0 that is exactly n, so
+        # num_computed_tokens catches up to num_tokens and the next W-wide
+        # reservation is stamped on top. Subtracting only n would leave W-n
+        # placeholders behind, and the next step would schedule W tokens the
+        # request does not have, running num_computed_tokens past num_tokens.
         new_token_ids, stopped = Scheduler._update_request_with_output(
             self, request, new_token_ids
         )

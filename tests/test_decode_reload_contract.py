@@ -26,9 +26,11 @@ from vllm_tt_plugin.spec_decode import VerifyOutput
 def _bind_committed_width(runner: SimpleNamespace) -> SimpleNamespace:
     """Attach the block-output width helpers ``_apply_sampled_tokens_to_state``
     resolves the committed width through (``_tt_committed_width`` reads
-    ``_is_adaptive_block_output`` and ``_output_tokens_per_step``). These decode
+    ``_is_adaptive_block_output`` and ``_output_tokens_per_step``; the row parse
+    reads ``_is_adaptive_block_ragged``). These decode
     fakes are non-adaptive, so the committed width is ``_output_tokens_per_step``."""
     runner._is_adaptive_block_output = False
+    runner._is_adaptive_block_ragged = False
     runner._tt_committed_width = lambda toks: TTModelRunner._tt_committed_width(
         runner, toks
     )

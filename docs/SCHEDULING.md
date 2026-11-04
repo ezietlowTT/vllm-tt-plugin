@@ -446,6 +446,12 @@ since a block-output request cannot resume). A step that mixes prefill and
 decode requests raises `RuntimeError`; `TTScheduler`'s modes schedule them in
 separate steps.
 
+With `tt_adaptive_block_ragged` on top, a block step commits `1..W` tokens per
+request (the runner has already stripped the row padding). The request still
+consumes its whole `W` placeholder reservation: the next step then schedules
+exactly the `n` tokens it gained, so `num_computed_tokens` catches up to
+`num_tokens` before the next `W`-wide reservation is added.
+
 Each step's decision is recorded on that step's own `SchedulerOutput`, in the
 `_tt_block_step_decisions` map (`set_tt_block_step_decisions` /
 `get_tt_block_step_decisions`), and bound in `update_from_output` before the

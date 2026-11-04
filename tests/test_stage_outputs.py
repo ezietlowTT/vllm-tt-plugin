@@ -219,7 +219,11 @@ def test_the_sync_path_publishes_the_frame_of_a_step_that_samples_eos():
     def build(sampled, logprobs, req_ids=None, stage_outputs=None):
         # The real builder: it is what puts the frames on the output.
         return TTModelRunner._build_runner_output(
-            SimpleNamespace(input_batch=runner.input_batch, _tt_committed_width=len),
+            SimpleNamespace(
+                input_batch=runner.input_batch,
+                _tt_committed_width=len,
+                _is_adaptive_block_ragged=False,
+            ),
             sampled,
             logprobs,
             stage_outputs=stage_outputs,

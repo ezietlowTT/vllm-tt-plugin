@@ -42,6 +42,7 @@ from vllm_tt_plugin.async_decode import (
     TTDecodeSubmission,
 )
 from vllm_tt_plugin.config import (
+    TT_RAGGED_BLOCK_PAD_TOKEN_ID,
     get_tt_data_parallel_size,
     get_tt_max_batch_size,
     get_tt_output_tokens_per_step,
@@ -52,6 +53,7 @@ from vllm_tt_plugin.config import (
     get_tt_supports_stage_inputs,
     get_tt_supports_stage_outputs,
     is_tt_adaptive_block_output_model,
+    is_tt_adaptive_block_ragged,
     is_tt_block_output_model,
     is_tt_device_grammar_preload_eligible,
 )
@@ -253,6 +255,50 @@ def _coerce_output_block(
     return sampled_token_ids
 
 
+def _ragged_row_widths(sampled_token_ids_np: np.ndarray) -> np.ndarray:
+    """Per-row committed widths of a ragged block (tt_adaptive_block_ragged).
+
+    The step output is rectangular ``[num_reqs, W]``; row ``i`` carries
+    ``1 <= n_i <= W`` real token ids followed by
+    ``TT_RAGGED_BLOCK_PAD_TOKEN_ID`` padding, and ``n_i`` is the number of
+    non-negative ids in the row. A row with no real id, or padding before a
+    real id, violates the contract and raises rather than committing junk.
+    """
+    valid = sampled_token_ids_np >= 0
+    widths = valid.sum(axis=1, dtype=np.int64)
+    num_reqs, width = valid.shape
+    if num_reqs == 0:
+        return widths
+    if int(widths.min()) < 1:
+        raise ValueError(
+            "Ragged block output row commits no token: every row needs at least "
+            f"one real id before its {TT_RAGGED_BLOCK_PAD_TOKEN_ID} padding; "
+            f"row widths {widths.tolist()}"
+        )
+    # Padding must be a suffix: the first n_i entries of each row are real.
+    first_pad = np.where(valid.all(axis=1), width, valid.argmin(axis=1))
+    if not np.array_equal(first_pad, widths):
+        raise ValueError(
+            f"Ragged block output has {TT_RAGGED_BLOCK_PAD_TOKEN_ID} padding "
+            "before a real token id in row(s) "
+            f"{np.flatnonzero(first_pad != widths).tolist()}"
+        )
+    return widths
+
+
+def _committed_row_widths(
+    sampled_token_ids_np: np.ndarray, num_out_tokens: int, ragged: bool
+) -> np.ndarray:
+    """How many ids each row of one step's ``[num_reqs, num_out_tokens]``
+    output commits: all of them under the fixed contract, the row's own
+    ``1..W`` real ids on a ragged block step. Width-1 rows (prefill anchors and
+    plain decodes) carry no padding either way.
+    """
+    if ragged and num_out_tokens > 1:
+        return _ragged_row_widths(sampled_token_ids_np)
+    return np.full(sampled_token_ids_np.shape[0], num_out_tokens, dtype=np.int64)
+
+
 def _notify_model_slot_moves(runner, moves: dict[int, int]) -> None:
     """Tell the model that its per-slot state moved ``old -> new``.
 
@@ -313,6 +359,9 @@ class TTModelRunner:
         self._is_block_output_model = is_tt_block_output_model(vllm_config)
         self._shutdown_complete = False
         self._is_adaptive_block_output = is_tt_adaptive_block_output_model(vllm_config)
+        # Ragged batched blocks: a block step's [num_reqs, W] rows carry 1..W
+        # real ids each, padded; only the real ids are committed.
+        self._is_adaptive_block_ragged = is_tt_adaptive_block_ragged(vllm_config)
         self._device_grammar_poisoned = False
 
         # Resolved and validated by the platform's config-time admission;
@@ -4491,19 +4540,28 @@ class TTModelRunner:
             if req_id_to_index is not None
             else {req_id: idx for idx, req_id in enumerate(output_req_ids)}
         )
+        num_out_tokens = self._tt_committed_width(sampled_token_ids)
         sampled_token_ids = _coerce_output_block(
-            sampled_token_ids, num_reqs, self._tt_committed_width(sampled_token_ids)
+            sampled_token_ids, num_reqs, num_out_tokens
         )
 
         sampled_token_ids_np = sampled_token_ids.numpy()
         if sampled_token_ids_np.dtype != np.int32:
             sampled_token_ids_np = sampled_token_ids_np.astype(np.int32, copy=False)
+        row_widths = _committed_row_widths(
+            sampled_token_ids_np, num_out_tokens, self._is_adaptive_block_ragged
+        )
 
         prompt_logprobs_dict: dict[str, LogprobsTensors | None] = dict.fromkeys(
             (output_req_ids[i] for i in range(num_reqs)), None
         )
+        # Ragged rows are published without their padding: the scheduler sees
+        # exactly the n_i committed ids of each row.
         sampled_token_id_lists = [
-            [int(token_id) for token_id in row] for row in sampled_token_ids_np.tolist()
+            [int(token_id) for token_id in row[:row_width]]
+            for row, row_width in zip(
+                sampled_token_ids_np.tolist(), row_widths.tolist()
+            )
         ]
 
         output = ModelRunnerOutput(
@@ -4542,13 +4600,16 @@ class TTModelRunner:
         sampled_token_ids_np = sampled_token_ids.numpy()
         if sampled_token_ids_np.dtype != np.int32:
             sampled_token_ids_np = sampled_token_ids_np.astype(np.int32, copy=False)
+        row_widths = _committed_row_widths(
+            sampled_token_ids_np, num_out_tokens, self._is_adaptive_block_ragged
+        )
 
         max_model_len = self.model_config.max_model_len
 
         if not use_captured_req_ids:
             rows = np.arange(num_reqs)
             start_idxs = self.input_batch.num_tokens[rows]
-            end_idxs = start_idxs + num_out_tokens
+            end_idxs = start_idxs + row_widths.astype(start_idxs.dtype, copy=False)
             max_end = int(end_idxs.max()) if num_reqs > 0 else 0
             if max_end > max_model_len:
                 if num_out_tokens == 1:
@@ -4621,9 +4682,10 @@ class TTModelRunner:
                 f"tokens: req_id={req_id!r}"
             )
             current_row = self.input_batch.req_id_to_index.get(req_id)
+            row_width = int(row_widths[req_idx])
             if current_row is not None:
                 start_idx = int(self.input_batch.num_tokens[current_row])
-                end_idx = start_idx + num_out_tokens
+                end_idx = start_idx + row_width
                 if end_idx > max_model_len:
                     logger.warning(
                         "Block canvas exceeds max_model_len=%d for request %s; "
@@ -4636,7 +4698,7 @@ class TTModelRunner:
                 self.input_batch.token_ids_cpu[current_row, start_idx:end_idx] = block
                 self.input_batch.num_tokens[current_row] = end_idx
             else:
-                block = sampled_token_ids_np[req_idx]
+                block = sampled_token_ids_np[req_idx][:row_width]
 
             req_state.output_token_ids.extend(int(token_id) for token_id in block)
 

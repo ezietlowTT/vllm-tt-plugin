@@ -61,6 +61,7 @@ def _runner(model: SampledTarget, num_speculative_tokens: int = DRAFT_LEN):
         _output_tokens_per_step=1,
         _is_block_output_model=False,
         _is_adaptive_block_output=False,
+        _is_adaptive_block_ragged=False,
         _num_speculative_tokens=num_speculative_tokens,
         _spec_accept_modes=plan.accept_modes if num_speculative_tokens else (),
         async_decode_scheduling=False,

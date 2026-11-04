@@ -45,12 +45,28 @@ def _outputs(tokens_by_req: dict[str, list[int]]) -> ModelRunnerOutput:
     )
 
 
-def _batched_pair(*, prompt_a: int = 32, prompt_b: int = 32, max_prompt: int = 0):
+def _batched_pair(
+    *,
+    prompt_a: int = 32,
+    prompt_b: int = 32,
+    max_prompt: int = 0,
+    ragged: bool = False,
+    max_tokens_a: int = CANVAS * 4,
+    ignore_eos: bool = True,
+    kv_extent: int = 0,
+):
     """Two requests driven through their batched prefill anchors (5 and 6)."""
     scheduler = _scheduler(
-        adaptive=True, max_num_seqs=2, batched=True, max_prompt=max_prompt
+        adaptive=True,
+        max_num_seqs=2,
+        batched=True,
+        ragged=ragged,
+        max_prompt=max_prompt,
+        kv_extent=kv_extent,
     )
-    req_a = _request(CANVAS * 4, request_id="req-a", prompt_length=prompt_a)
+    req_a = _request(
+        max_tokens_a, request_id="req-a", prompt_length=prompt_a, ignore_eos=ignore_eos
+    )
     req_b = _request(CANVAS * 4, request_id="req-b", prompt_length=prompt_b)
     scheduler.add_request(req_a)
     scheduler.add_request(req_b)
@@ -168,6 +184,7 @@ def test_runner_commits_a_full_block_for_every_row():
     runner = SimpleNamespace(
         _output_tokens_per_step=width,
         _is_adaptive_block_output=True,
+        _is_adaptive_block_ragged=False,
         input_batch=SimpleNamespace(
             num_reqs=2,
             req_ids=["a", "b"],

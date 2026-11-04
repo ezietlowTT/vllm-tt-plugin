@@ -67,6 +67,7 @@ def _runner(*, supports_stage_inputs: bool) -> SimpleNamespace:
         _output_tokens_per_step=1,
         _is_block_output_model=False,
         _is_adaptive_block_output=False,
+        _is_adaptive_block_ragged=False,
         _num_speculative_tokens=0,
         async_decode_scheduling=False,
         _spec_method=None,

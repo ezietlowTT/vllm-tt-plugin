@@ -34,6 +34,7 @@ from vllm_tt_plugin.config import (
     store_tt_adaptive_block_batched,
     store_tt_adaptive_block_max_prompt_tokens,
     store_tt_adaptive_block_output,
+    store_tt_adaptive_block_ragged,
     store_tt_block_kv_extent_tokens,
     store_tt_lane_count,
     store_tt_output_tokens_per_step,
@@ -2083,6 +2084,16 @@ class TTPlatform(Platform):
                 "tt_adaptive_block_batched requires tt_adaptive_block_output"
             )
         store_tt_adaptive_block_batched(vllm_config, adaptive_block_batched)
+        # Ragged batched blocks: each request of a block step commits its own
+        # 1..W tokens, keeping the batched contract's per-step W reservation.
+        adaptive_block_ragged = bool(
+            (model_capabilities or {}).get("tt_adaptive_block_ragged", False)
+        )
+        if adaptive_block_ragged and not adaptive_block_batched:
+            raise ValueError(
+                "tt_adaptive_block_ragged requires tt_adaptive_block_batched"
+            )
+        store_tt_adaptive_block_ragged(vllm_config, adaptive_block_ragged)
         # Optional prompt-length frontier for the adaptive block path: prompts
         # above it are served as plain baseline by the model, so the scheduler
         # must reserve width-1 for them (see TTScheduler). 0 = no limit.
