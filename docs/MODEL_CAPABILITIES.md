@@ -60,7 +60,7 @@ Sources: [platform.py](../src/vllm_tt_plugin/platform.py),
 | `model_capabilities` key | Default when absent | Meaning and current validation |
 |---|---|---|
 | `supports_chunked_prefill` | `False` | Permits scheduler-driven chunked prefill when `scheduler_config.enable_chunked_prefill` is also true. The platform disables chunked prefill for `output_tokens_per_step > 1` regardless of this declaration. When chunked prefill remains enabled, the platform sets `disable_chunked_mm_input=True`. |
-| `supports_prefix_caching` | `False` | Permits vLLM automatic prefix caching. The platform disables requested prefix caching when this declaration is false. The platform rejects `supports_prefix_caching=True` together with `output_tokens_per_step > 1`. |
+| `supports_prefix_caching` | `False` | Permits vLLM automatic prefix caching. The platform disables requested prefix caching when this declaration is false. For a block-output model (`output_tokens_per_step > 1`) the declaration also promises that the KV, and recurrent state in `MambaSpec` groups, of every fed position match the committed tokens, so the scheduler caches blocks filled by decode steps as vLLM does for a token model. |
 | `output_tokens_per_step` | `1` | Declares the committed output width. The platform requires an integer at least 1 and rejects Boolean values. A value above 1 selects block-output execution. Contract-based speculation instead uses `output_tokens_per_step=1` and an admitted `SpecPlan`. |
 | `tt_adaptive_block_output` | `False` | Allows an eligible solo decode to commit a block and requires batched decode to use the ordinary one-token path. The platform rejects this declaration unless `output_tokens_per_step > 1`. Adaptive block output relaxes the plain block-output concurrency, data-parallel, executor, async-scheduling, and device-sampling restrictions described below. |
 | `tt_adaptive_block_batched` | `False` | Declares one speculative session per request: every decode step is a block step for every request in it (solo or batched) whose prompt is within `tt_adaptive_block_max_prompt_tokens`, each committing `output_tokens_per_step` tokens. Prefill steps still commit one anchor per request. The platform rejects this declaration without `tt_adaptive_block_output`. `TTScheduler` raises on a step mixing prefill and decode requests. See [SCHEDULING.md](SCHEDULING.md#adaptive-block-output-reservation). |
@@ -78,9 +78,10 @@ Plain block-output execution requires `max_num_seqs=1`, data-parallel size 1,
 requests, data parallelism, the `mp` executor, async scheduling when the model
 declares `supports_async_decode`, and `sample_on_device_mode="decode_only"`.
 
-Both block-output variants reject `speculative_config`, prefix caching,
+Both block-output variants reject `speculative_config`,
 `max_device_top_k` (accepted with `tt_plain_fallback`), explicit
-`diffusion_config`, custom `logits_processors`, and the Rust frontend. Both variants require callable `release_request` and
+`diffusion_config`, custom `logits_processors`, and the Rust frontend. Both
+variants require callable `release_request` and
 `release_persistent_capture` hooks. Adaptive block-output execution additionally
 requires `note_state_slots_moved` when `max_num_seqs > 1`.
 
