@@ -39,6 +39,7 @@ from vllm_tt_plugin.config import (
     store_tt_block_output_multimodal,
     store_tt_lane_count,
     store_tt_output_tokens_per_step,
+    store_tt_plain_fallback,
     store_tt_spec_plan,
     store_tt_supports_device_grammar,
     tt_requests_cannot_resume,
@@ -46,6 +47,10 @@ from vllm_tt_plugin.config import (
     validate_and_store_tt_supports_stage_inputs,
     validate_tt_lane_config,
     validate_tt_scheduler_config,
+)
+from vllm_tt_plugin.lane_routing import (
+    TT_EXECUTION_LANE_PLAIN,
+    block_output_request_lane,
 )
 from vllm_tt_plugin.logger import init_tt_logger
 from vllm_tt_plugin.spec_admission import (
@@ -1014,29 +1019,36 @@ def _pin_v1_model_runner() -> None:
     os.environ[_V2_MODEL_RUNNER_ENV] = "0"
 
 
-def _neutralize_model_owned_sampling(params) -> list[str]:
+def _neutralize_model_owned_sampling(
+    params, *, keep_transport_controls: bool = False
+) -> list[str]:
     """Reset HTTP sampling controls on the cloned per-request SamplingParams.
 
     The model owns its Gumbel sampler and temperature schedule, but common
     OpenAI clients still send transport sampling controls, so they are
     accepted and ignored. Returns the neutralized fields for logging.
+
+    ``keep_transport_controls`` keeps temperature, top_p, top_k and seed: a
+    ``tt_plain_fallback`` dflash-lane request's anchor is sampled by vLLM's
+    sampler with them. min_p and the penalties are still reset.
     """
     ignored = []
-    if params.temperature != 1.0:
-        ignored.append(f"temperature={params.temperature!r}")
-        params.temperature = 1.0
-    if params.top_p != 1.0:
-        ignored.append(f"top_p={params.top_p!r}")
-        params.top_p = 1.0
-    if params.top_k not in (0, -1):
-        ignored.append(f"top_k={params.top_k!r}")
-        params.top_k = 0
+    if not keep_transport_controls:
+        if params.temperature != 1.0:
+            ignored.append(f"temperature={params.temperature!r}")
+            params.temperature = 1.0
+        if params.top_p != 1.0:
+            ignored.append(f"top_p={params.top_p!r}")
+            params.top_p = 1.0
+        if params.top_k not in (0, -1):
+            ignored.append(f"top_k={params.top_k!r}")
+            params.top_k = 0
+        if params.seed is not None:
+            ignored.append(f"seed={params.seed!r}")
+            params.seed = None
     if params.min_p != 0.0:
         ignored.append(f"min_p={params.min_p!r}")
         params.min_p = 0.0
-    if params.seed is not None:
-        ignored.append(f"seed={params.seed!r}")
-        params.seed = None
     if params.presence_penalty != 0.0:
         ignored.append(f"presence_penalty={params.presence_penalty!r}")
         params.presence_penalty = 0.0
@@ -1098,7 +1110,17 @@ def _install_tt_input_processor_patch() -> None:
         if not is_block_output_model or cloned_params is None:
             return request
 
-        ignored = _neutralize_model_owned_sampling(cloned_params)
+        lane = block_output_request_lane(self.vllm_config, cloned_params)
+        if lane == TT_EXECUTION_LANE_PLAIN:
+            # tt_plain_fallback plain lane: one-token decode with every request
+            # control and the requested (or vLLM-default) max_tokens.
+            return request
+        # Under tt_plain_fallback a dflash-lane request's anchor and width-1
+        # steps are sampled with its own controls (a greedy request stays
+        # greedy); only its block steps are model-owned.
+        ignored = _neutralize_model_owned_sampling(
+            cloned_params, keep_transport_controls=lane is not None
+        )
         if ignored:
             logger.warning_once(
                 "This block-output model uses its model-owned sampler; HTTP "
@@ -2103,6 +2125,15 @@ class TTPlatform(Platform):
                 "tt_block_output_multimodal requires tt_adaptive_block_output"
             )
         store_tt_block_output_multimodal(vllm_config, block_output_multimodal)
+        # Execution lanes: requests the block sampler cannot serve decode one
+        # token per step. Each lane request owns its own session, so this
+        # builds on the batched contract.
+        plain_fallback = bool(
+            (model_capabilities or {}).get("tt_plain_fallback", False)
+        )
+        if plain_fallback and not adaptive_block_batched:
+            raise ValueError("tt_plain_fallback requires tt_adaptive_block_batched")
+        store_tt_plain_fallback(vllm_config, plain_fallback)
         # Optional prompt-length frontier for the adaptive block path: prompts
         # above it are served as plain baseline by the model, so the scheduler
         # must reserve width-1 for them (see TTScheduler). 0 = no limit.
@@ -2825,39 +2856,45 @@ class TTPlatform(Platform):
             return
 
         output_size, max_model_len = block_contract
+        # tt_plain_fallback: None without it (every request is a block request).
+        lane = block_output_request_lane(cls._resolve_tt_admission_handle(), params)
         prompt_len = length_from_prompt_token_ids_or_embeds(
             processed_inputs.get("prompt_token_ids"),
             processed_inputs.get("prompt_embeds"),
         )
-        cls._resolve_block_output_max_tokens(
-            prompt_len,
-            params.max_tokens,
-            output_size,
-            max_model_len,
-        )
+        if lane != TT_EXECUTION_LANE_PLAIN:
+            cls._resolve_block_output_max_tokens(
+                prompt_len,
+                params.max_tokens,
+                output_size,
+                max_model_len,
+            )
 
         # Reject unsupported response-contract controls. Model-owned sampling
         # controls (temperature etc.) are instead accepted and neutralized on
-        # the per-request clone in _install_tt_input_processor_patch.
+        # the per-request clone in _install_tt_input_processor_patch. Under
+        # tt_plain_fallback any of the first group routes the request to the
+        # plain lane, which serves it.
         unsupported = []
-        if params.n != 1:
-            unsupported.append(f"n={params.n!r} (accepted: 1)")
-        if params.logprobs is not None:
-            unsupported.append(f"logprobs={params.logprobs!r} (accepted: None)")
-        if params.logprob_token_ids is not None:
-            unsupported.append("logprob_token_ids (accepted: omitted/None)")
-        if params.flat_logprobs:
-            unsupported.append("flat_logprobs=True (accepted: False)")
-        if params.bad_words:
-            unsupported.append("bad_words (accepted: omitted/empty)")
-        if params.structured_outputs is not None:
-            unsupported.append("structured_outputs (accepted: omitted/None)")
-        if params.logit_bias is not None:
-            unsupported.append("logit_bias (accepted: omitted/None)")
-        if params.allowed_token_ids is not None:
-            unsupported.append("allowed_token_ids (accepted: omitted/None)")
-        if params.min_tokens != 0:
-            unsupported.append(f"min_tokens={params.min_tokens!r} (accepted: 0)")
+        if lane is None:
+            if params.n != 1:
+                unsupported.append(f"n={params.n!r} (accepted: 1)")
+            if params.logprobs is not None:
+                unsupported.append(f"logprobs={params.logprobs!r} (accepted: None)")
+            if params.logprob_token_ids is not None:
+                unsupported.append("logprob_token_ids (accepted: omitted/None)")
+            if params.flat_logprobs:
+                unsupported.append("flat_logprobs=True (accepted: False)")
+            if params.bad_words:
+                unsupported.append("bad_words (accepted: omitted/empty)")
+            if params.structured_outputs is not None:
+                unsupported.append("structured_outputs (accepted: omitted/None)")
+            if params.logit_bias is not None:
+                unsupported.append("logit_bias (accepted: omitted/None)")
+            if params.allowed_token_ids is not None:
+                unsupported.append("allowed_token_ids (accepted: omitted/None)")
+            if params.min_tokens != 0:
+                unsupported.append(f"min_tokens={params.min_tokens!r} (accepted: 0)")
         if params.thinking_token_budget is not None:
             unsupported.append("thinking_token_budget (accepted: omitted/None)")
         if params.repetition_detection is not None:

@@ -34,6 +34,13 @@ def _forced_reset_step():
     return scheduler.schedule()
 
 
+def _execution_lane_step():
+    """A tt_plain_fallback scheduler tags its steps with their execution lane."""
+    scheduler = _scheduler(adaptive=True, batched=True, plain_fallback=True)
+    scheduler.add_request(_request(8))
+    return scheduler.schedule()
+
+
 def _lane_step():
     return _make_coordinator([FakeLane(running=1), FakeLane()]).schedule()
 
@@ -42,7 +49,9 @@ def _tt_fields(scheduler_output):
     return {name for name in vars(scheduler_output) if name.startswith("_tt_")}
 
 
-@pytest.mark.parametrize("step", [_block_step, _forced_reset_step, _lane_step])
+@pytest.mark.parametrize(
+    "step", [_block_step, _forced_reset_step, _lane_step, _execution_lane_step]
+)
 def test_the_tt_fields_a_step_sets_survive_a_rebuild_from_dataclass_fields(step):
     scheduler_output = step()
     attached = _tt_fields(scheduler_output)
@@ -65,7 +74,15 @@ def test_the_tt_fields_a_step_sets_survive_a_rebuild_from_dataclass_fields(step)
 
 def test_the_inventory_covers_every_tt_field_a_step_sets():
     seen = set().union(
-        *(_tt_fields(step()) for step in (_block_step, _forced_reset_step, _lane_step))
+        *(
+            _tt_fields(step())
+            for step in (
+                _block_step,
+                _forced_reset_step,
+                _lane_step,
+                _execution_lane_step,
+            )
+        )
     )
 
     assert seen == set(TT_SCHEDULER_OUTPUT_FIELDS)

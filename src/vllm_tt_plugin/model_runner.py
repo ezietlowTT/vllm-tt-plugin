@@ -52,6 +52,7 @@ from vllm_tt_plugin.config import (
     get_tt_supports_device_grammar,
     get_tt_supports_stage_inputs,
     get_tt_supports_stage_outputs,
+    has_tt_plain_fallback,
     is_tt_adaptive_block_output_model,
     is_tt_adaptive_block_ragged,
     is_tt_block_output_model,
@@ -67,6 +68,10 @@ from vllm_tt_plugin.input_batch import (
     build_cached_request_state,
     clone_torch_generator,
     log_prefill_chunks,
+)
+from vllm_tt_plugin.lane_routing import (
+    TT_EXECUTION_LANE_PLAIN,
+    get_tt_execution_lane,
 )
 from vllm_tt_plugin.lane_scheduler import get_tt_step_plan
 from vllm_tt_plugin.loader import TTModelLoader
@@ -362,6 +367,8 @@ class TTModelRunner:
         # Ragged batched blocks: a block step's [num_reqs, W] rows carry 1..W
         # real ids each, padded; only the real ids are committed.
         self._is_adaptive_block_ragged = is_tt_adaptive_block_ragged(vllm_config)
+        # tt_plain_fallback: plain-lane requests keep logprobs and host sampling.
+        self._plain_fallback = has_tt_plain_fallback(vllm_config)
         self._device_grammar_poisoned = False
 
         # Resolved and validated by the platform's config-time admission;
@@ -740,7 +747,9 @@ class TTModelRunner:
                 block_sizes=per_group_block_sizes,
                 kernel_block_sizes=per_group_block_sizes,
                 logitsprocs=self._host_logitsprocs,
-                disable_logprobs=self._is_block_output_model,
+                disable_logprobs=(
+                    self._is_block_output_model and not self._plain_fallback
+                ),
                 output_tokens_per_step=self._output_tokens_per_step,
             )
         else:
@@ -752,7 +761,9 @@ class TTModelRunner:
                 block_sizes=per_group_block_sizes,
                 kernel_block_sizes=per_group_block_sizes,
                 logitsprocs=self._host_logitsprocs,
-                disable_logprobs=self._is_block_output_model,
+                disable_logprobs=(
+                    self._is_block_output_model and not self._plain_fallback
+                ),
                 output_tokens_per_step=self._output_tokens_per_step,
             )
 
@@ -2614,6 +2625,7 @@ class TTModelRunner:
             is_decode=not is_prompt,
             has_structured_outputs=has_structured,
             sampling_rows=req_indices,
+            execution_lane=get_tt_execution_lane(scheduler_output),
         )
         if has_structured and not has_scheduled_structured:
             perform_device_sampling = False
@@ -2743,6 +2755,7 @@ class TTModelRunner:
             tt_sampling_params=tt_sampling_params,
             multi_modal_kwargs=multi_modal_kwargs,
             perform_device_sampling=perform_device_sampling,
+            execution_lane=get_tt_execution_lane(scheduler_output),
             grammar_bitmask=[bitmask],  # wrap to match DP case
             prompt_tokens=prompt_tokens,
             output_tokens=output_tokens,
@@ -3938,8 +3951,12 @@ class TTModelRunner:
         has_structured_outputs: bool,
         *,
         sampling_rows: list[int] | None = None,
+        execution_lane: str | None = None,
     ) -> bool:
         """Return whether this step's rows can be sampled on device.
+
+        ``execution_lane`` is the step's ``tt_plain_fallback`` lane (see
+        ``lane_routing.get_tt_execution_lane``), ``None`` without lane routing.
 
         Structured outputs use the device only for decode. Async scheduling
         keeps the single traced logits buffer safe: the engine samples each
@@ -3992,6 +4009,15 @@ class TTModelRunner:
                 return False
         if not input_batch.no_penalties and not self.model.model_capabilities.get(
             "supports_device_penalties", True
+        ):
+            return False
+        # A plain-lane step keeps random sampling and penalties on vLLM's
+        # reference host sampler: the block model's device sampler is not
+        # known to match it there. A greedy, penalty-free plain step falls
+        # through to the generic checks below (a min_tokens processor, for
+        # example, keeps host sampling only until its minimum is reached).
+        if execution_lane == TT_EXECUTION_LANE_PLAIN and (
+            not input_batch.all_greedy or not input_batch.no_penalties
         ):
             return False
         has_always_host_only_sampling_params = (
@@ -4248,12 +4274,14 @@ class TTModelRunner:
                 return tensor[_rows]
 
             # An adaptive block model's PREFILL emits one plain host-sampled
-            # anchor token (its blocks come only from solo decode steps); any
+            # anchor token (its blocks come only from solo decode steps), and a
+            # tt_plain_fallback plain-lane decode emits one ordinary token; any
             # other host-sampled block step cannot construct the canvas.
             if (
                 not perform_device_sampling
                 and self._is_block_output_model
                 and not (self._is_adaptive_block_output and not is_decode)
+                and model_input.execution_lane != TT_EXECUTION_LANE_PLAIN
             ):
                 raise ValueError(
                     "Block-output step fell back to host sampling; "

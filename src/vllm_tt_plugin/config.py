@@ -319,6 +319,30 @@ def store_tt_block_output_multimodal(vllm_config: "VllmConfig", flag: bool) -> N
 
 
 # Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
+_PLAIN_FALLBACK_KEY = "_tt_plain_fallback"
+
+
+def has_tt_plain_fallback(vllm_config: "VllmConfig") -> bool:
+    """Whether block-output requests are routed to a DFlash or plain lane.
+
+    A model declaring ``tt_plain_fallback`` serves requests whose controls its
+    block sampler cannot honour with ordinary one-token decode; see
+    ``vllm_tt_plugin.lane_routing``.
+    """
+    return _read_tt_internal_flag(vllm_config, _PLAIN_FALLBACK_KEY)
+
+
+def store_tt_plain_fallback(vllm_config: "VllmConfig", flag: bool) -> None:
+    """Record the model's ``tt_plain_fallback`` capability.
+
+    Internal platform-to-runtime handoff, validated by
+    ``TTPlatform.check_and_update_config`` against
+    ``tt_adaptive_block_batched``.
+    """
+    _store_tt_internal_flag(vllm_config, _PLAIN_FALLBACK_KEY, flag)
+
+
+# Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
 _ADAPTIVE_BLOCK_MAX_PROMPT_KEY = "_tt_adaptive_block_max_prompt_tokens"
 
 

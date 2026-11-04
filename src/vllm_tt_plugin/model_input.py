@@ -250,6 +250,10 @@ class TTModelInput:
     # request's output has grown.
     spec_min_tokens: dict[int, tuple[int, tuple[int, ...]]] | None = None
 
+    # tt_plain_fallback step lane ("prefill", "dflash" or "plain"); None when
+    # the scheduler routes no lanes. See vllm_tt_plugin.lane_routing.
+    execution_lane: str | None = None
+
 
 def live_row_index(
     model_input: TTModelInput, row_req_ids: list[str] | None = None

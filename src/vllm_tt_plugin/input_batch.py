@@ -24,6 +24,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
+from vllm_tt_plugin.lane_routing import get_tt_execution_lane
 from vllm_tt_plugin.logger import init_tt_logger
 from vllm_tt_plugin.logprobs import build_device_logprobs
 from vllm_tt_plugin.model_input import (
@@ -1421,6 +1422,7 @@ class TTLaneInputBatch(InputBatch):
             is_decode=True,
             has_structured_outputs=has_structured,
             sampling_rows=occupied,
+            execution_lane=get_tt_execution_lane(scheduler_output),
         )
         if has_structured and not has_scheduled_structured:
             perform_device_sampling = False
@@ -1475,6 +1477,7 @@ class TTLaneInputBatch(InputBatch):
             tt_sampling_params=tt_sampling_params,
             multi_modal_kwargs={},
             perform_device_sampling=perform_device_sampling,
+            execution_lane=get_tt_execution_lane(scheduler_output),
             grammar_bitmask=[bitmask],
             prompt_tokens=prompt_tokens,
             output_tokens=output_tokens,
@@ -1585,6 +1588,7 @@ class TTLaneInputBatch(InputBatch):
             is_decode=False,
             has_structured_outputs=has_structured,
             sampling_rows=rows,
+            execution_lane=get_tt_execution_lane(scheduler_output),
         )
         if intermediate_prefill_mask.any():
             # Device sampling advances device RNG state for every row it reads,
@@ -1619,6 +1623,7 @@ class TTLaneInputBatch(InputBatch):
             tt_sampling_params=tt_sampling_params,
             multi_modal_kwargs=multi_modal_kwargs,
             perform_device_sampling=perform_device_sampling,
+            execution_lane=get_tt_execution_lane(scheduler_output),
             grammar_bitmask=[bitmask],
             prompt_tokens=prompt_tokens,
             output_tokens=output_tokens,

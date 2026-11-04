@@ -465,11 +465,33 @@ output with no recorded decision. It sits next to the forced-reset discard
 counts, which block steps reject outright: a stale async frame cannot balance a
 K-placeholder reservation.
 
+#### Execution lanes (`tt_plain_fallback`)
+
+A model declaring `tt_plain_fallback` (on top of `tt_adaptive_block_batched`)
+serves two request classes. `TTScheduler.add_request` classifies every request
+once (`lane_routing.classify_tt_execution_lane`) and `TTLaneRouter` keeps the
+lane for the request's life:
+
+- `dflash`: greedy with only neutral host controls; its decode steps are block
+  steps, and it gets the block-request repair (whole-canvas `max_tokens`
+  clamp, control strip);
+- `plain`: anything else; it decodes one token per step, keeps its controls
+  and `max_tokens`, and its prompt is truncated only to leave room for one
+  token.
+
+Every decode step serves one lane: `_schedule_decode_only(lane)` hides the
+other lane's running decodes as it hides partial prefills, and the lanes
+alternate when both have work. Each step carries `_tt_execution_lane`
+(`prefill`, `dflash` or `plain`) and `_tt_request_execution_lanes` (the lane
+of every scheduled request; a prefill step may hold both). Without the
+capability neither field is set and decode steps are not filtered.
+
 ### TT fields on `SchedulerOutput`
 
 TT attaches per-step state to `SchedulerOutput` beside its dataclass fields:
 forced-reset discard counts, the requests whose output frames the step
-reserved, block-step decisions, and lane step state.
+reserved, block-step decisions, lane step state, and the step's execution
+lanes.
 `TT_SCHEDULER_OUTPUT_FIELDS` in `scheduler.py` lists them all, and
 `set_tt_scheduler_output_field` refuses any other name. A scheduler that
 rebuilds a `SchedulerOutput` from its dataclass fields alone loses them; it

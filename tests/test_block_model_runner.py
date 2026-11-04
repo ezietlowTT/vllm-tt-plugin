@@ -532,6 +532,7 @@ def _extract(
     device_sampling=True,
     is_decode=False,
     enable_log_probs=False,
+    execution_lane=None,
 ):
     runner = _bind_committed_width(
         SimpleNamespace(
@@ -548,6 +549,7 @@ def _extract(
         intermediate_prefill_mask=None,
         max_num_logprobs=[None],
         grammar_bitmask=[None],
+        execution_lane=execution_lane,
     )
     return TTModelRunner._get_output_tokens(
         runner,

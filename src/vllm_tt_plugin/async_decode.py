@@ -14,6 +14,7 @@ import ttnn
 from vllm.v1.outputs import AsyncModelRunnerOutput, LogprobsLists, ModelRunnerOutput
 
 from vllm_tt_plugin.input_batch import SEED_NONE_SENTINEL
+from vllm_tt_plugin.lane_routing import get_tt_execution_lane
 from vllm_tt_plugin.logger import init_tt_logger
 from vllm_tt_plugin.model_input import TTCompactedHostLogits
 from vllm_tt_plugin.scheduler import get_tt_forced_reset_discard_counts
@@ -628,6 +629,7 @@ class TTAsyncDecodeController:
         return runner.check_perform_device_sampling(
             is_decode=True,
             has_structured_outputs=False,
+            execution_lane=get_tt_execution_lane(scheduler_output),
         )
 
     def can_attempt_steady_decode_from_scheduler(

@@ -19,6 +19,7 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_qu
 from vllm.v1.request import RequestStatus
 
 from vllm_tt_plugin.config import get_tt_decode_interleave_config
+from vllm_tt_plugin.lane_routing import TTLaneRouter
 from vllm_tt_plugin.scheduler import (
     TTDecodeInterleavePolicy,
     TTScheduler,
@@ -237,6 +238,7 @@ def _scheduler(*, running=(), waiting=0, mode=TTSchedulingMode.DEFAULT, **tt_key
     scheduler.max_num_active_reqs = 8
     scheduler._forced_mode = mode
     scheduler._decode_interleave = _policy(**tt_keys)
+    scheduler._lane_router = TTLaneRouter(enabled=False)
     return scheduler
 
 
@@ -250,7 +252,7 @@ def _record_phases(scheduler, monkeypatch, steps):
     phases = []
 
     def one_token(kind):
-        def stub():
+        def stub(execution_lane=None):
             phases.append(kind)
             out = SchedulerOutput.make_empty()
             out.num_scheduled_tokens = {"r": 1}
@@ -353,7 +355,7 @@ def test_zero_progress_fallback_still_reaches_decode(monkeypatch):
     monkeypatch.setattr(
         scheduler,
         "_schedule_decode_only",
-        lambda: calls.append("D") or SchedulerOutput.make_empty(),
+        lambda execution_lane=None: calls.append("D") or SchedulerOutput.make_empty(),
     )
 
     scheduler.schedule()
@@ -370,7 +372,7 @@ def test_forced_mode_bypasses_the_policy(monkeypatch):
         decode_interleave_prefill_steps=1,
     )
 
-    def fail_decode():
+    def fail_decode(execution_lane=None):
         raise AssertionError("forced prefill must remain coordinated across lanes")
 
     def prefill_one_token():

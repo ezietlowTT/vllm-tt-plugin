@@ -13,6 +13,7 @@ from vllm.v1.request import RequestStatus
 
 from tests.test_block_scheduler import _request, _runner_output
 from tests.test_block_scheduler import _scheduler as _real_scheduler
+from vllm_tt_plugin.lane_routing import TTLaneRouter
 from vllm_tt_plugin.scheduler import (
     TTDecodeInterleavePolicy,
     TTScheduler,
@@ -48,6 +49,7 @@ def _scheduler(*, running=(), waiting=0, kv_holding_waiting=0, mode):
     scheduler._decode_interleave = TTDecodeInterleavePolicy(
         SimpleNamespace(additional_config={})
     )
+    scheduler._lane_router = TTLaneRouter(enabled=False)
     return scheduler
 
 
@@ -58,7 +60,7 @@ def test_forced_prefill_does_not_fallback_to_decode_per_lane(monkeypatch):
 
     monkeypatch.setattr(scheduler, "_schedule_prefill_only", SchedulerOutput.make_empty)
 
-    def fail_local_decode_fallback():
+    def fail_local_decode_fallback(execution_lane=None):
         raise AssertionError("forced prefill must remain coordinated across lanes")
 
     monkeypatch.setattr(scheduler, "_schedule_decode_only", fail_local_decode_fallback)
@@ -89,7 +91,9 @@ def test_decode_fallback_preserves_cleanup_from_both_outputs(
     decode.preempted_req_ids = decode_preemptions
     decode.free_encoder_mm_hashes = ["image-decode"]
     monkeypatch.setattr(scheduler, "_schedule_prefill_only", lambda: prefill)
-    monkeypatch.setattr(scheduler, "_schedule_decode_only", lambda: decode)
+    monkeypatch.setattr(
+        scheduler, "_schedule_decode_only", lambda execution_lane=None: decode
+    )
 
     result = scheduler.schedule()
 
@@ -140,7 +144,7 @@ def test_running_continuation_alone_still_schedules_prefill(monkeypatch):
         lambda: calls.append("prefill") or SchedulerOutput.make_empty(),
     )
 
-    def fail_decode_fallback():
+    def fail_decode_fallback(execution_lane=None):
         raise AssertionError("a decode step cannot advance a partial prefill")
 
     monkeypatch.setattr(scheduler, "_schedule_decode_only", fail_decode_fallback)
