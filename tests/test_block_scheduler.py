@@ -41,6 +41,7 @@ from vllm_tt_plugin.config import (
     store_tt_adaptive_block_output,
     store_tt_adaptive_block_ragged,
     store_tt_block_kv_extent_tokens,
+    store_tt_block_output_multimodal,
     store_tt_output_tokens_per_step,
 )
 from vllm_tt_plugin.input_batch import InputBatch
@@ -100,6 +101,7 @@ def _scheduler(
     stage_outputs: bool = False,
     batched: bool = False,
     ragged: bool = False,
+    multimodal: bool = False,
     max_prompt: int = 0,
 ) -> TTScheduler:
     model_config = ModelConfig(
@@ -152,6 +154,8 @@ def _scheduler(
         store_tt_adaptive_block_batched(config, True)
     if ragged:
         store_tt_adaptive_block_ragged(config, True)
+    if multimodal:
+        store_tt_block_output_multimodal(config, True)
     if max_prompt:
         store_tt_adaptive_block_max_prompt_tokens(config, max_prompt)
     if kv_extent:

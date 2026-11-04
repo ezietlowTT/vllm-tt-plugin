@@ -26,6 +26,7 @@ from vllm_tt_plugin.config import (
     is_tt_adaptive_block_output_model,
     is_tt_adaptive_block_ragged,
     is_tt_block_output_model,
+    is_tt_block_output_multimodal,
     tt_requests_cannot_resume,
 )
 from vllm_tt_plugin.logger import init_tt_logger
@@ -383,6 +384,7 @@ class TTScheduler(AsyncScheduler):
         self._output_tokens_per_step = get_tt_output_tokens_per_step(self.vllm_config)
         self._is_block_output_model = is_tt_block_output_model(self.vllm_config)
         self._requests_cannot_resume = tt_requests_cannot_resume(self.vllm_config)
+        self._block_output_multimodal = is_tt_block_output_multimodal(self.vllm_config)
         # Adaptive: emit the block only on a solo decode step; batch >1 decodes
         # as plain baseline. Lets max_num_seqs>1 coexist with block-output.
         self._is_adaptive_block = is_tt_adaptive_block_output_model(self.vllm_config)
@@ -544,6 +546,14 @@ class TTScheduler(AsyncScheduler):
         self._strip_unsupported_block_controls(request)
 
     def _drop_unencodable_mm_features(self, request: Request) -> None:
+        if (
+            request.mm_features
+            and self._block_output_multimodal
+            and self.max_num_encoder_input_tokens > 0
+        ):
+            # tt_block_output_multimodal: the model encodes its features, and
+            # the base scheduler has an encoder budget to schedule them with.
+            return
         if request.mm_features:
             # A text-only block model has a zero encoder budget: a feature at
             # offset 0 forces zero-token schedules forever (head-of-line

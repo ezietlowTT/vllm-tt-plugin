@@ -294,6 +294,31 @@ def store_tt_adaptive_block_ragged(vllm_config: "VllmConfig", flag: bool) -> Non
 
 
 # Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
+_BLOCK_OUTPUT_MULTIMODAL_KEY = "_tt_block_output_multimodal"
+
+
+def is_tt_block_output_multimodal(vllm_config: "VllmConfig") -> bool:
+    """Whether an adaptive block-output model consumes multimodal features.
+
+    Without it ``TTScheduler`` drops encoder features from every block-output
+    request (the placeholder positions decode as ordinary tokens), because a
+    text-only block model has no encoder budget. A vision-capable adaptive
+    block model declares ``tt_block_output_multimodal`` so its requests keep
+    their features through prefill.
+    """
+    return _read_tt_internal_flag(vllm_config, _BLOCK_OUTPUT_MULTIMODAL_KEY)
+
+
+def store_tt_block_output_multimodal(vllm_config: "VllmConfig", flag: bool) -> None:
+    """Record the model's ``tt_block_output_multimodal`` capability.
+
+    Internal platform-to-runtime handoff, validated by
+    ``TTPlatform.check_and_update_config`` against ``tt_adaptive_block_output``.
+    """
+    _store_tt_internal_flag(vllm_config, _BLOCK_OUTPUT_MULTIMODAL_KEY, flag)
+
+
+# Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
 _ADAPTIVE_BLOCK_MAX_PROMPT_KEY = "_tt_adaptive_block_max_prompt_tokens"
 
 

@@ -36,6 +36,7 @@ from vllm_tt_plugin.config import (
     store_tt_adaptive_block_output,
     store_tt_adaptive_block_ragged,
     store_tt_block_kv_extent_tokens,
+    store_tt_block_output_multimodal,
     store_tt_lane_count,
     store_tt_output_tokens_per_step,
     store_tt_spec_plan,
@@ -2094,6 +2095,14 @@ class TTPlatform(Platform):
                 "tt_adaptive_block_ragged requires tt_adaptive_block_batched"
             )
         store_tt_adaptive_block_ragged(vllm_config, adaptive_block_ragged)
+        block_output_multimodal = bool(
+            (model_capabilities or {}).get("tt_block_output_multimodal", False)
+        )
+        if block_output_multimodal and not adaptive_block_output:
+            raise ValueError(
+                "tt_block_output_multimodal requires tt_adaptive_block_output"
+            )
+        store_tt_block_output_multimodal(vllm_config, block_output_multimodal)
         # Optional prompt-length frontier for the adaptive block path: prompts
         # above it are served as plain baseline by the model, so the scheduler
         # must reserve width-1 for them (see TTScheduler). 0 = no limit.
