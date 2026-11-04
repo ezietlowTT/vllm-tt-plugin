@@ -44,6 +44,7 @@ from vllm_tt_plugin.config import (
     get_tt_output_tokens_per_step,
     get_tt_per_lane_max_num_seqs,
     is_tt_block_output_model,
+    resolve_tt_model_capabilities,
 )
 from vllm_tt_plugin.logger import init_tt_logger
 from vllm_tt_plugin.model_runner import TTModelRunner
@@ -303,7 +304,7 @@ class TTWorker(WorkerBase):
             os.environ.get("MESH_DEVICE"),
         )
         model_class, _ = get_model_architecture(self.model_config)
-        model_capabilities = getattr(model_class, "model_capabilities", None) or {}
+        model_capabilities = resolve_tt_model_capabilities(model_class) or {}
         self.mesh_device = open_mesh_device(
             get_tt_config(self.vllm_config),
             self.trace_mode,

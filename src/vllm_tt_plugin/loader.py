@@ -7,6 +7,7 @@ from vllm.model_executor.model_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import get_model_architecture
 
 from vllm_tt_plugin.config import (
+    bind_tt_model_capabilities,
     get_tt_config,
     get_tt_data_parallel_size,
     get_tt_max_batch_size,
@@ -43,6 +44,7 @@ class TTModelLoader(BaseModelLoader):
             tt_data_parallel=tt_data_parallel,
             optimizations=optimizations,
         )
+        bind_tt_model_capabilities(model, model_class)
         return model
 
     def download_model(self, model_config: ModelConfig) -> None:

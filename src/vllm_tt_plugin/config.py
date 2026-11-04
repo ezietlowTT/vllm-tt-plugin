@@ -17,6 +17,52 @@ TT_SCHEDULER_CLS = "vllm_tt_plugin.scheduler.TTScheduler"
 TT_LANE_SCHEDULER_CLS = "vllm_tt_plugin.lane_scheduler.TTLaneCoordinator"
 
 
+def resolve_tt_model_capabilities(model_class: Any) -> dict | None:
+    """Return the capability declarations of a TT model class.
+
+    A model class declares ``model_capabilities`` as a class-level dict. A
+    class whose declarations depend on its launch profile (for example a
+    block width chosen by the serving environment) may instead define a
+    zero-argument ``get_model_capabilities()`` classmethod; when it is
+    callable its result replaces the class dict. Every plugin reader of class
+    declarations resolves through here, and ``bind_tt_model_capabilities``
+    gives the constructed model the same dict, so config time and runtime read
+    one set of declarations. The hook may run more than once per process and
+    must return equal dicts each time.
+    """
+    resolver = getattr(model_class, "get_model_capabilities", None)
+    capabilities = (
+        resolver()
+        if callable(resolver)
+        else getattr(model_class, "model_capabilities", None)
+    )
+    if capabilities is not None and not isinstance(capabilities, dict):
+        raise TypeError(
+            f"{getattr(model_class, '__module__', '?')}."
+            f"{getattr(model_class, '__name__', model_class)} capabilities must "
+            f"be a dict or None, got {type(capabilities).__name__}: "
+            f"{capabilities!r}"
+        )
+    return capabilities
+
+
+def bind_tt_model_capabilities(model: Any, model_class: Any) -> None:
+    """Give a constructed model the declarations its class resolved to.
+
+    Runtime consumers (``TTModelRunner``, ``TTAsyncDecodeController``) read
+    ``model.model_capabilities``. For a class with ``get_model_capabilities``
+    the inherited class dict is the stale import-time one, so the instance
+    gets the resolved dict instead. A model that sets its own instance dict in
+    ``__init__`` (for example to narrow ``supports_sample_on_device`` on a mesh
+    without a device sampler) owns that dict and keeps it.
+    """
+    if not callable(getattr(model_class, "get_model_capabilities", None)):
+        return
+    if "model_capabilities" in vars(model):
+        return
+    model.model_capabilities = resolve_tt_model_capabilities(model_class) or {}
+
+
 def _extract_tt_config(
     config: dict[str, Any], config_name: str
 ) -> tuple[dict[str, Any], bool]:

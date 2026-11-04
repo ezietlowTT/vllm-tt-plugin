@@ -51,6 +51,10 @@ An ordinary text adapter needs `initialize_vllm_model`, `prefill_forward`,
 `warmup_model_prefill` and `warmup_model_decode`. Supply `model_capabilities`
 on the class and instance, even when the dictionary is empty: platform
 admission tolerates absence, but runtime sampling reads the dictionary directly.
+A class whose declarations depend on the launch profile may define the
+`get_model_capabilities()` classmethod instead; the plugin reads its result at
+configuration time and binds it onto the constructed model (see
+[resolved capabilities](MODEL_CAPABILITIES.md#resolved-capabilities-get_model_capabilities)).
 
 The execution page specifies when `read_decode_output` and
 `process_decode_output_host` are needed. Add extension hooks only with the

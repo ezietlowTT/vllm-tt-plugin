@@ -28,6 +28,7 @@ from vllm_tt_plugin.config import (
     is_tt_adaptive_block_output_model,
     is_tt_block_output_model,
     require_tt_output_tokens_per_step,
+    resolve_tt_model_capabilities,
     resolve_tt_scheduler_cls,
     resolve_tt_supports_stage_outputs,
     store_tt_adaptive_block_max_prompt_tokens,
@@ -538,7 +539,7 @@ def _model_capability_flag(model_class, key: str) -> bool:
     at config time. A declaration that raises fails the launch: silently falling
     back to standard DP would run the model in the wrong execution mode.
     """
-    capabilities = getattr(model_class, "model_capabilities", None) or {}
+    capabilities = resolve_tt_model_capabilities(model_class) or {}
     value = capabilities.get(key, False)
     if callable(value):
         try:
@@ -1754,9 +1755,7 @@ class TTPlatform(Platform):
     @classmethod
     def _resolve_output_tokens_per_step(cls, model_class: type) -> int:
         """Validate and return a model's committed output-width capability."""
-        model_capabilities: dict | None = getattr(
-            model_class, "model_capabilities", None
-        )
+        model_capabilities = resolve_tt_model_capabilities(model_class)
         output_tokens_per_step = (
             model_capabilities.get("output_tokens_per_step", 1)
             if model_capabilities
@@ -2037,10 +2036,8 @@ class TTPlatform(Platform):
 
         model_class, _ = get_model_architecture(vllm_config.model_config)
 
-        # Get model capabilities from the class
-        model_capabilities: dict | None = getattr(
-            model_class, "model_capabilities", None
-        )
+        # The class dict, or its get_model_capabilities() result.
+        model_capabilities = resolve_tt_model_capabilities(model_class)
 
         # Rewrites scheduler_config; nothing between here and the closing
         # ``verify_max_model_len`` reads the fields it touches.

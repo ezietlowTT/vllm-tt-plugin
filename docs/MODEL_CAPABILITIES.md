@@ -26,17 +26,23 @@ KV allocation, forward calls, and model lifecycle.
 behavior by supplying internal `_tt_*` values.
 
 1. `TTPlatform.check_and_update_config` obtains the selected model class and
-   reads `model_capabilities` before model construction.
+   reads `model_capabilities` before model construction. A model class whose
+   declarations depend on its launch profile may define a zero-argument
+   `get_model_capabilities()` classmethod instead; when it is callable, its
+   returned dict (or `None`) replaces the class dict for every plugin reader,
+   and a non-dict result fails the launch. See
+   [resolved capabilities](#resolved-capabilities-get_model_capabilities).
 2. `TTPlatform.check_and_update_config` updates scheduler and cache settings,
    validates incompatible combinations, and stores resolved TT values on
    `VllmConfig.additional_config` through `store_tt_*` and
    `validate_and_store_tt_*` helpers.
 3. `TTWorker.init_device` repeats `TTPlatform.check_and_update_config` in each
-   worker process and reads `model_capabilities["fabric_config"]` before
+   worker process and reads the resolved `fabric_config` before
    `open_mesh_device` opens the device mesh.
 4. `TTModelRunner` and `TTAsyncDecodeController` also read runtime declarations for
-   sampling, hidden-state handoff, and resident decode. Model authors must
-   keep class and instance declarations consistent.
+   sampling, hidden-state handoff, and resident decode from the constructed
+   model's `model_capabilities`. Model authors must keep class and instance
+   declarations consistent.
 
 The plugin uses defaults when a declaration is absent. Most Boolean
 declarations use truth-value checks, not a common strict schema. Model authors
@@ -227,6 +233,32 @@ row capacity, or shared target-cache constraints are satisfied.
 Sources: [spec_decode.py](../src/vllm_tt_plugin/spec_decode.py),
 [spec_admission.py](../src/vllm_tt_plugin/spec_admission.py), and
 [config.py](../src/vllm_tt_plugin/config.py).
+
+## Resolved capabilities (`get_model_capabilities`)
+
+A class-level `model_capabilities` dict is evaluated when Python imports the
+model module. A model class that serves several launch profiles, for example a
+block-output width chosen by the serving environment, may instead define
+`get_model_capabilities()`, a zero-argument classmethod returning a dict or
+`None`.
+
+- `config.resolve_tt_model_capabilities` calls the hook when it is callable,
+  otherwise reads the class dict. `TTPlatform.check_and_update_config`, the
+  output-width check, the lane-fold declaration, and `TTWorker.init_device`
+  all read through it.
+- `TTModelLoader.load_model` binds the same resolved dict onto the
+  constructed model (`bind_tt_model_capabilities`), so runtime readers of
+  `model.model_capabilities` see the dict that configuration validated. A
+  model that assigns its own instance `model_capabilities` in `__init__`
+  keeps that dict and must derive it from `get_model_capabilities()`.
+- The hook may run more than once per process (once per configuration pass
+  and once at load) and must return equal dicts each time.
+- A class without the hook keeps the class-dict contract unchanged.
+
+Sources: [config.py](../src/vllm_tt_plugin/config.py),
+[loader.py](../src/vllm_tt_plugin/loader.py),
+[platform.py](../src/vllm_tt_plugin/platform.py), and
+[worker.py](../src/vllm_tt_plugin/worker.py).
 
 ## Hooks that are not capability keys
 
