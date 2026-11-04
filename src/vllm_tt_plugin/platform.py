@@ -2083,15 +2083,6 @@ class TTPlatform(Platform):
                 "seeded_sampling_policy='host' requires single-token model "
                 "output; block-output models own their sampling."
             )
-        if (
-            output_tokens_per_step > 1
-            and model_capabilities is not None
-            and model_capabilities.get("max_device_top_k") is not None
-        ):
-            raise ValueError(
-                "max_device_top_k requires host sampling fallback and cannot be "
-                "used by block-output models (output_tokens_per_step > 1)."
-            )
         store_tt_output_tokens_per_step(vllm_config, output_tokens_per_step)
         # Adaptive block-output: the model emits its block ONLY when it decodes
         # alone (batch==1) and falls back to plain batched baseline otherwise,
@@ -2143,6 +2134,20 @@ class TTPlatform(Platform):
         if plain_fallback and not adaptive_block_batched:
             raise ValueError("tt_plain_fallback requires tt_adaptive_block_batched")
         store_tt_plain_fallback(vllm_config, plain_fallback)
+        # max_device_top_k routes out-of-bound rows to host sampling. Only the
+        # plain lane's one-token steps (and adaptive prefill anchors) may
+        # host-sample; without plain fallback a block-output model's decode
+        # steps could never honour the bound.
+        if (
+            output_tokens_per_step > 1
+            and not plain_fallback
+            and (model_capabilities or {}).get("max_device_top_k") is not None
+        ):
+            raise ValueError(
+                "max_device_top_k requires host sampling fallback and cannot be "
+                "used by block-output models (output_tokens_per_step > 1) "
+                "without tt_plain_fallback."
+            )
         # Sampled DFlash: temperature > 0 requests may take the dflash lane,
         # where the model samples losslessly (exact rejection sampling).
         dflash_sampled = bool(

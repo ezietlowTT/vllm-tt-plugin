@@ -18,6 +18,7 @@ def _runner(policy, *, cap=32):
     sampling.top_k[:] = 5
     return SimpleNamespace(
         sample_on_device_mode="all",
+        _is_block_output_model=False,
         seeded_sampling_policy=policy,
         num_devices=4,
         tt_data_parallel_size=1,

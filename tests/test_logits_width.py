@@ -93,6 +93,7 @@ def _model_input() -> SimpleNamespace:
         bad_words_token_ids_list=[None],
         logitsprocs_list=[None],
         generators_list=[{}],
+        execution_lane=None,
     )
 
 

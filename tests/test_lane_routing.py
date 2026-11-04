@@ -288,6 +288,7 @@ def test_input_processor_keeps_a_dflash_request_greedy(monkeypatch):
 def _sampling_runner(*, greedy=True, penalties=False, active_processor=False):
     runner = object.__new__(TTModelRunner)
     runner.sample_on_device_mode = "decode_only"
+    runner._is_block_output_model = False
     runner.model = SimpleNamespace(model_capabilities={})
     runner.seeded_sampling_policy = "auto"
     runner.supports_device_grammar = False
@@ -322,19 +323,14 @@ def test_a_greedy_plain_step_samples_on_device():
 @pytest.mark.parametrize(
     ("runner", "structured"),
     [
-        pytest.param(_sampling_runner(greedy=False), False, id="random"),
-        pytest.param(_sampling_runner(penalties=True), False, id="penalties"),
         pytest.param(_sampling_runner(active_processor=True), False, id="processor"),
         pytest.param(_sampling_runner(), True, id="structured"),
     ],
 )
 def test_plain_steps_keep_semantic_controls_on_host(runner, structured):
+    """Random and penalised plain steps follow the model's device-sampler
+    declarations (tests/test_block_device_sampler_bounds.py)."""
     assert not _device(runner, TT_EXECUTION_LANE_PLAIN, structured)
-
-
-def test_a_random_step_outside_the_plain_lane_is_unchanged():
-    assert _device(_sampling_runner(greedy=False), None)
-    assert _device(_sampling_runner(greedy=False), TT_EXECUTION_LANE_DFLASH)
 
 
 def test_a_plain_decode_step_may_host_sample(monkeypatch):

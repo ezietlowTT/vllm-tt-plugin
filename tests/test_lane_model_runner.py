@@ -353,7 +353,9 @@ def test_get_output_tokens_skips_all_intermediate_prefill_rows():
         _num_speculative_tokens=0,
         _output_tokens_per_step=1,
     )
-    model_input = SimpleNamespace(intermediate_prefill_mask=torch.tensor([True]))
+    model_input = SimpleNamespace(
+        intermediate_prefill_mask=torch.tensor([True]), execution_lane=None
+    )
 
     sampled, logprobs = TTModelRunner._get_output_tokens(
         runner,

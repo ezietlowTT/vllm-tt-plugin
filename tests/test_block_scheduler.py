@@ -504,6 +504,7 @@ def test_repaired_bypassed_request_keeps_block_step_on_device_sampling(repaired)
     batch.refresh_logitsprocs()
     runner = SimpleNamespace(
         sample_on_device_mode="all",
+        _is_block_output_model=False,
         model=SimpleNamespace(model_capabilities={"supports_device_penalties": False}),
         num_devices=4,
         tt_data_parallel_size=1,

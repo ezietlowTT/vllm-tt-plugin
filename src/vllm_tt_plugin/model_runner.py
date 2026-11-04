@@ -307,6 +307,20 @@ def _committed_row_widths(
     return np.full(sampled_token_ids_np.shape[0], num_out_tokens, dtype=np.int64)
 
 
+def _step_may_host_sample(runner, is_decode: bool, execution_lane: str | None) -> bool:
+    """Whether a step's rows may fall back to host sampling.
+
+    Every step of an ordinary model may. A block-output model's steps commit a
+    model-sampled canvas, except an adaptive model's prefill anchor and a
+    ``tt_plain_fallback`` plain-lane decode, which commit one ordinary token.
+    """
+    if not runner._is_block_output_model:
+        return True
+    if runner._is_adaptive_block_output and not is_decode:
+        return True
+    return execution_lane == TT_EXECUTION_LANE_PLAIN
+
+
 def _notify_model_slot_moves(runner, moves: dict[int, int]) -> None:
     """Tell the model that its per-slot state moved ``old -> new``.
 
@@ -4008,7 +4022,14 @@ class TTModelRunner:
         # Always host-only sampling params: min_p, bad_words, logit_bias,
         # allowed_token_ids, min_tokens require host sampling.
         input_batch = self.input_batch
-        max_top_k = self.model.model_capabilities.get("max_device_top_k")
+        # The model's device-sampler limits route rows to the host sampler,
+        # which a block step cannot use; its model owns that sampling.
+        may_host_sample = _step_may_host_sample(self, is_decode, execution_lane)
+        max_top_k = (
+            self.model.model_capabilities.get("max_device_top_k")
+            if may_host_sample
+            else None
+        )
         if max_top_k is not None or self.seeded_sampling_policy == "host":
             sampling = input_batch.sampling
             # Prefill can submit only a subset of the resident lane requests.
@@ -4035,17 +4056,10 @@ class TTModelRunner:
             )
             if needs_unbounded_or_larger_k.any():
                 return False
-        if not input_batch.no_penalties and not self.model.model_capabilities.get(
-            "supports_device_penalties", True
-        ):
-            return False
-        # A plain-lane step keeps random sampling and penalties on vLLM's
-        # reference host sampler: the block model's device sampler is not
-        # known to match it there. A greedy, penalty-free plain step falls
-        # through to the generic checks below (a min_tokens processor, for
-        # example, keeps host sampling only until its minimum is reached).
-        if execution_lane == TT_EXECUTION_LANE_PLAIN and (
-            not input_batch.all_greedy or not input_batch.no_penalties
+        if (
+            may_host_sample
+            and not input_batch.no_penalties
+            and not self.model.model_capabilities.get("supports_device_penalties", True)
         ):
             return False
         has_always_host_only_sampling_params = (
@@ -4311,11 +4325,8 @@ class TTModelRunner:
             # anchor token (its blocks come only from solo decode steps), and a
             # tt_plain_fallback plain-lane decode emits one ordinary token; any
             # other host-sampled block step cannot construct the canvas.
-            if (
-                not perform_device_sampling
-                and self._is_block_output_model
-                and not (self._is_adaptive_block_output and not is_decode)
-                and model_input.execution_lane != TT_EXECUTION_LANE_PLAIN
+            if not perform_device_sampling and not _step_may_host_sample(
+                self, is_decode, model_input.execution_lane
             ):
                 raise ValueError(
                     "Block-output step fell back to host sampling; "
