@@ -72,6 +72,7 @@ from vllm_tt_plugin.input_batch import (
 from vllm_tt_plugin.lane_routing import (
     TT_EXECUTION_LANE_PLAIN,
     get_tt_execution_lane,
+    prefill_row_execution_lanes,
 )
 from vllm_tt_plugin.lane_scheduler import get_tt_step_plan
 from vllm_tt_plugin.loader import TTModelLoader
@@ -2756,6 +2757,11 @@ class TTModelRunner:
             multi_modal_kwargs=multi_modal_kwargs,
             perform_device_sampling=perform_device_sampling,
             execution_lane=get_tt_execution_lane(scheduler_output),
+            request_execution_lanes=(
+                prefill_row_execution_lanes(scheduler_output, row_req_ids)
+                if is_prompt and self._plain_fallback
+                else None
+            ),
             grammar_bitmask=[bitmask],  # wrap to match DP case
             prompt_tokens=prompt_tokens,
             output_tokens=output_tokens,
@@ -4115,6 +4121,12 @@ class TTModelRunner:
                     empty_slots.append(dp_rank * stride + i)
         if empty_slots is not None:
             kwargs["empty_slots"] = list(empty_slots)
+        # tt_plain_fallback only (None otherwise): each row's lane, so the
+        # model arms block state only for dflash rows.
+        if model_input.request_execution_lanes is not None:
+            kwargs["request_execution_lanes"] = list(
+                model_input.request_execution_lanes
+            )
 
         if self.request_specific_rope:
             tt_out, rope_deltas = self.model.prefill_forward(**kwargs)

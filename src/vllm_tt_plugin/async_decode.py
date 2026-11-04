@@ -1347,6 +1347,10 @@ class TTAsyncDecodeController:
         # kwarg.
         if model_input.block_tables_per_layer is not None:
             kwargs["page_tables_per_layer"] = model_input.block_tables_per_layer
+        # tt_plain_fallback only: the step's lane ("dflash" or "plain"); a
+        # model without the capability keeps its call shape.
+        if runner._plain_fallback:
+            kwargs["execution_lane"] = model_input.execution_lane
         device_sampling_params = None
         # Speculative side tensors, sent only on a speculating decode step so a
         # model that never speculates keeps its present call shape. A verify

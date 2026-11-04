@@ -113,7 +113,11 @@ def _host_runner(host_sampler=None, *, vocab=VOCAB, **attrs):
     """Fake runner for host read-back, carrying the real logits-shape guard so
     the well-formed shapes these tests use stay well-formed."""
     runner = SimpleNamespace(
-        host_sampler=host_sampler, model=SimpleNamespace(), vocab_size=vocab, **attrs
+        _plain_fallback=False,
+        host_sampler=host_sampler,
+        model=SimpleNamespace(),
+        vocab_size=vocab,
+        **attrs,
     )
     runner._check_host_logits = MethodType(TTModelRunner._check_host_logits, runner)
     return runner
@@ -338,6 +342,7 @@ def test_lane_prefill_input_ends_at_scheduled_chunk_boundary(monkeypatch):
             _block_tables_per_layer=lambda _: None,
             check_perform_device_sampling=lambda **_: True,
             _output_tokens_per_step=1,
+            _plain_fallback=False,
             model_config=SimpleNamespace(is_multimodal_model=False),
             requests={"request": request},
         )
@@ -1065,6 +1070,7 @@ def test_lane_top_k_uses_rows_in_submitted_step(scheduled_top_k, is_decode):
         prefill_empty_slots=None if is_decode else (row,),
     )
     runner = SimpleNamespace(
+        _plain_fallback=False,
         input_batch=batch,
         sample_on_device_mode="all",
         seeded_sampling_policy="auto",

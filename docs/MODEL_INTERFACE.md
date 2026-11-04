@@ -56,6 +56,11 @@ A class whose declarations depend on the launch profile may define the
 configuration time and binds it onto the constructed model (see
 [resolved capabilities](MODEL_CAPABILITIES.md#resolved-capabilities-get_model_capabilities)).
 
+A model that declares `tt_plain_fallback` also receives each row's lane:
+`request_execution_lanes` on `prefill_forward` and `execution_lane` on
+`decode_forward` ([execution](MODEL_EXECUTION.md)). No other model receives
+either keyword.
+
 The execution page specifies when `read_decode_output` and
 `process_decode_output_host` are needed. Add extension hooks only with the
 matching declarations and behavior. In particular, a capability declaration

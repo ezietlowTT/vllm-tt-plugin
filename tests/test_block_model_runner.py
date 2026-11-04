@@ -39,6 +39,7 @@ def _bind_committed_width(runner: SimpleNamespace) -> SimpleNamespace:
     """
     runner._is_adaptive_block_output = False
     runner._is_adaptive_block_ragged = False
+    runner._plain_fallback = False
     runner._tt_committed_width = lambda toks: TTModelRunner._tt_committed_width(
         runner, toks
     )
@@ -620,6 +621,7 @@ class _WidthRunnerStub:
     def __init__(self, adaptive: bool, width: int):
         self._is_adaptive_block_output = adaptive
         self._is_adaptive_block_ragged = False
+        self._plain_fallback = False
         self._output_tokens_per_step = width
 
 

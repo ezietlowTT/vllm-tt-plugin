@@ -96,6 +96,7 @@ def _decode_input(row_req_ids, tokens, positions, padded_rows=0):
 def _controller(prompt_lens, model=None):
     model = model or _StageModel()
     runner = SimpleNamespace(
+        _plain_fallback=False,
         model=model,
         trace_mode="decode_only",
         kv_caches=object(),
@@ -176,6 +177,7 @@ def test_prefill_never_asks_for_stage_outputs():
             raise AssertionError("prefill completes no frame")
 
     runner = SimpleNamespace(
+        _plain_fallback=False,
         kv_caches=object(),
         trace_mode="none",
         request_specific_rope=False,
@@ -193,6 +195,7 @@ def test_prefill_never_asks_for_stage_outputs():
         stage_inputs=None,
         perform_device_sampling=False,
         prefill_empty_slots=[0],
+        request_execution_lanes=None,
     )
 
     TTModelRunner.submit_prefill(runner, model_input, [1])
@@ -223,6 +226,7 @@ def test_the_sync_path_publishes_the_frame_of_a_step_that_samples_eos():
                 input_batch=runner.input_batch,
                 _tt_committed_width=len,
                 _is_adaptive_block_ragged=False,
+                _plain_fallback=False,
             ),
             sampled,
             logprobs,
@@ -230,6 +234,7 @@ def test_the_sync_path_publishes_the_frame_of_a_step_that_samples_eos():
         )
 
     runner = SimpleNamespace(
+        _plain_fallback=False,
         _apply_grammar_to_input=lambda model_input, grammar, lane_total: model_input,
         _sample_sync_forward=lambda fwd: ([torch.tensor([[EOS]])], []),
         scheduler_config=SimpleNamespace(async_scheduling=False),
@@ -246,6 +251,7 @@ def test_the_sync_path_publishes_the_frame_of_a_step_that_samples_eos():
 
 def test_preempting_a_stage_request_fails_loudly():
     runner = SimpleNamespace(
+        _plain_fallback=False,
         supports_stage_outputs=True,
         requests={"a": object()},
         encoder_cache={},

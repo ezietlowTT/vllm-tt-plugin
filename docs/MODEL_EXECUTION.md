@@ -46,6 +46,7 @@ keyword arguments below, not a `TTModelInput` object. Source:
 | `empty_slots` | When supplied, one destination device-state slot per submitted row. Preserve state belonging to other slots. |
 | `page_tables_per_layer` | Supplied for multiple KV groups, as described above. |
 | `sampling_params` | Supplied only when this prefill uses device sampling. See the sampling section. |
+| `request_execution_lanes` | Supplied only when the model declares `tt_plain_fallback`. One lane per row, `"dflash"` or `"plain"`, pinned at admission: arm block-decode state only for `"dflash"` rows. See [execution lanes](SCHEDULING.md#execution-lanes-tt_plain_fallback). |
 | `stage_inputs` | Supplied only when the model declares `supports_stage_inputs`. One entry per row: the request's stage payload as a plain dict, or `None`. The same payload arrives with every prefill of a request, so a chunked or resumed prefill sees it again. Decode receives none; see [stage inputs](MODEL_LIFECYCLE.md#stage-inputs). |
 
 For row `i`, `prefill_forward` computes
@@ -114,6 +115,7 @@ request-specific RoPE.
 | `slot_remap` | When present, destination slot `i` reads previous slot `slot_remap[i]`. Supplied for both host and device sampling. See [state ownership](MODEL_LIFECYCLE.md#request-state). |
 | `sampling_params` | Supplied for immediate device sampling; absent for host sampling and deferred grammar sampling. |
 | `prompt_tokens`, `output_tokens` | Supplied together when device sampling needs token history for penalties. Histories use `-1` padding. |
+| `execution_lane` | Supplied only when the model declares `tt_plain_fallback`: the step's lane. `"dflash"` steps are block steps for every row whose block decision is set; `"plain"` steps return one ordinary token per row and may be host-sampled. |
 
 The [decode reload contract](DECODE_RELOAD_CONTRACT.md) specifies
 `decode_input_update_contract`, `reload_inputs`, `reload_page_table`,

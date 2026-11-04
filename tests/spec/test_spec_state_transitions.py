@@ -61,6 +61,7 @@ def _runner() -> SimpleNamespace:
     )
     released: list[int] = []
     runner = SimpleNamespace(
+        _plain_fallback=False,
         model=DeterministicTarget(),
         input_batch=batch,
         requests={},

@@ -254,6 +254,10 @@ class TTModelInput:
     # the scheduler routes no lanes. See vllm_tt_plugin.lane_routing.
     execution_lane: str | None = None
 
+    # tt_plain_fallback: the admission-pinned lane of each prefill row, in
+    # forward-row order; None on decode steps and without lane routing.
+    request_execution_lanes: list[str] | None = None
+
 
 def live_row_index(
     model_input: TTModelInput, row_req_ids: list[str] | None = None

@@ -79,6 +79,7 @@ def _fake_runner(batch: InputBatch, request: CachedRequestState) -> SimpleNamesp
         _output_tokens_per_step=1,
         _is_adaptive_block_output=False,
         _is_adaptive_block_ragged=False,
+        _plain_fallback=False,
         tt_per_lane_max_num_seqs=MAX_NUM_SEQS,
         tt_data_parallel_size=DP_SIZE,
         max_num_blocks_per_req=MAX_MODEL_LEN // BLOCK_SIZE,

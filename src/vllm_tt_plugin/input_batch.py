@@ -24,7 +24,10 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
-from vllm_tt_plugin.lane_routing import get_tt_execution_lane
+from vllm_tt_plugin.lane_routing import (
+    get_tt_execution_lane,
+    prefill_row_execution_lanes,
+)
 from vllm_tt_plugin.logger import init_tt_logger
 from vllm_tt_plugin.logprobs import build_device_logprobs
 from vllm_tt_plugin.model_input import (
@@ -1624,6 +1627,13 @@ class TTLaneInputBatch(InputBatch):
             multi_modal_kwargs=multi_modal_kwargs,
             perform_device_sampling=perform_device_sampling,
             execution_lane=get_tt_execution_lane(scheduler_output),
+            request_execution_lanes=(
+                prefill_row_execution_lanes(
+                    scheduler_output, [lane_batch.req_ids[row] for row in rows]
+                )
+                if runner._plain_fallback
+                else None
+            ),
             grammar_bitmask=[bitmask],
             prompt_tokens=prompt_tokens,
             output_tokens=output_tokens,

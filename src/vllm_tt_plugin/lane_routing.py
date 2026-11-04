@@ -102,6 +102,24 @@ def get_tt_request_execution_lanes(
     return dict(getattr(scheduler_output, TT_REQUEST_EXECUTION_LANES_ATTR, {}))
 
 
+def prefill_row_execution_lanes(
+    scheduler_output: "SchedulerOutput", row_req_ids
+) -> list[str]:
+    """The lane of each prefill row, ``row_req_ids`` in forward-row order.
+
+    Call it only for a ``tt_plain_fallback`` model, whose scheduler tags every
+    scheduled request; a row without a lane raises.
+    """
+    lanes = get_tt_request_execution_lanes(scheduler_output)
+    missing = [req_id for req_id in row_req_ids if req_id not in lanes]
+    if missing:
+        raise ValueError(
+            f"Prefill rows {missing} have no execution lane in the step's "
+            f"lane map {lanes}"
+        )
+    return [lanes[req_id] for req_id in row_req_ids]
+
+
 class TTLaneRouter:
     """Per-scheduler lane bookkeeping: admission, lookup, and decode alternation.
 

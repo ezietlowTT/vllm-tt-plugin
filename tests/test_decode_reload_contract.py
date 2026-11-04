@@ -31,6 +31,7 @@ def _bind_committed_width(runner: SimpleNamespace) -> SimpleNamespace:
     fakes are non-adaptive, so the committed width is ``_output_tokens_per_step``."""
     runner._is_adaptive_block_output = False
     runner._is_adaptive_block_ragged = False
+    runner._plain_fallback = False
     runner._tt_committed_width = lambda toks: TTModelRunner._tt_committed_width(
         runner, toks
     )
@@ -39,6 +40,7 @@ def _bind_committed_width(runner: SimpleNamespace) -> SimpleNamespace:
 
 def _controller(*, trace_mode="decode_only", supports_async=True):
     runner = SimpleNamespace(
+        _plain_fallback=False,
         model=SimpleNamespace(
             model_capabilities={"supports_async_decode": supports_async}
         ),
@@ -150,6 +152,7 @@ def _verifying_controller():
             kv_caches=object(),
             request_specific_rope=False,
             supports_stage_outputs=False,
+            _plain_fallback=False,
         )
     )
     return TTAsyncDecodeController(runner), model
@@ -433,6 +436,7 @@ def _host_answering_controller(*, speculative_tokens):
             kv_caches=object(),
             request_specific_rope=False,
             supports_stage_outputs=False,
+            _plain_fallback=False,
             _num_speculative_tokens=speculative_tokens,
         )
     )
@@ -603,6 +607,7 @@ def test_submit_decode_delivers_page_table_only_refresh():
             kv_caches=object(),
             request_specific_rope=False,
             supports_stage_outputs=False,
+            _plain_fallback=False,
         )
     )
     controller = TTAsyncDecodeController(runner)
@@ -699,6 +704,7 @@ def test_state_slot_ownership_commits_only_after_accepted_decode():
             return torch.zeros((1, 1))
 
     runner = SimpleNamespace(
+        _plain_fallback=False,
         model=Model(),
         trace_mode="decode_only",
         kv_caches=object(),
@@ -824,6 +830,7 @@ def test_scheduler_context_phase_distinguishes_chunked_prefill_from_decode():
         num_tokens=np.array([8], dtype=np.int32),
     )
     runner = SimpleNamespace(
+        _plain_fallback=False,
         model=SimpleNamespace(decode_input_update_contract=1),
         input_batch=input_batch,
         _decode_layout_changed_since_last_decode=False,
@@ -871,6 +878,7 @@ def test_scheduler_prediction_rejects_every_front_packed_layout_transition():
         max_num_logprobs=None,
     )
     runner = SimpleNamespace(
+        _plain_fallback=False,
         model=SimpleNamespace(decode_input_update_contract=1),
         input_batch=input_batch,
         requests={req_id: SimpleNamespace(sampling_params=None) for req_id in req_ids},
@@ -928,6 +936,7 @@ def test_contract_v1_receives_commands_without_legacy_reset():
             kv_caches=object(),
             request_specific_rope=False,
             supports_stage_outputs=False,
+            _plain_fallback=False,
         )
     )
     controller = TTAsyncDecodeController(runner)
@@ -961,6 +970,7 @@ def test_contract_v1_host_sampling_still_receives_commands_and_remap():
             kv_caches=object(),
             request_specific_rope=False,
             supports_stage_outputs=False,
+            _plain_fallback=False,
         )
     )
     controller = TTAsyncDecodeController(runner)
@@ -997,6 +1007,7 @@ def test_contract_v0_keeps_legacy_call_shape_and_warns_once(monkeypatch):
             kv_caches=object(),
             request_specific_rope=False,
             supports_stage_outputs=False,
+            _plain_fallback=False,
             async_decode_scheduling=True,
         )
     )
@@ -1043,6 +1054,7 @@ def test_contract_v0_sync_mode_is_informational_once(monkeypatch):
             kv_caches=object(),
             request_specific_rope=False,
             supports_stage_outputs=False,
+            _plain_fallback=False,
             async_decode_scheduling=False,
         )
     )
