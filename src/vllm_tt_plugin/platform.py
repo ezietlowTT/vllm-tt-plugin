@@ -31,6 +31,7 @@ from vllm_tt_plugin.config import (
     resolve_tt_model_capabilities,
     resolve_tt_scheduler_cls,
     resolve_tt_supports_stage_outputs,
+    store_tt_adaptive_block_batched,
     store_tt_adaptive_block_max_prompt_tokens,
     store_tt_adaptive_block_output,
     store_tt_block_kv_extent_tokens,
@@ -2072,6 +2073,16 @@ class TTPlatform(Platform):
                 "tt_adaptive_block_output requires output_tokens_per_step > 1"
             )
         store_tt_adaptive_block_output(vllm_config, adaptive_block_output)
+        # Batched adaptive blocks: one speculative session per request, so every
+        # decode step is a block step for all of its requests.
+        adaptive_block_batched = bool(
+            (model_capabilities or {}).get("tt_adaptive_block_batched", False)
+        )
+        if adaptive_block_batched and not adaptive_block_output:
+            raise ValueError(
+                "tt_adaptive_block_batched requires tt_adaptive_block_output"
+            )
+        store_tt_adaptive_block_batched(vllm_config, adaptive_block_batched)
         # Optional prompt-length frontier for the adaptive block path: prompts
         # above it are served as plain baseline by the model, so the scheduler
         # must reserve width-1 for them (see TTScheduler). 0 = no limit.

@@ -438,6 +438,14 @@ property of the prefill that armed the session, applied once in
 `_mirror_spec_session` against the same `prompt_lens` quantity the model
 measures, and thereafter carried by ownership.
 
+A model that also declares `tt_adaptive_block_batched` runs one speculative
+session per request, so conditions 1 and 4 do not apply: every decode request
+of a step reserves the block, solo or batched, unless its prompt exceeds
+`tt_adaptive_block_max_prompt_tokens` (applied per request to its prompt,
+since a block-output request cannot resume). A step that mixes prefill and
+decode requests raises `RuntimeError`; `TTScheduler`'s modes schedule them in
+separate steps.
+
 Each step's decision is recorded on that step's own `SchedulerOutput`, in the
 `_tt_block_step_decisions` map (`set_tt_block_step_decisions` /
 `get_tt_block_step_decisions`), and bound in `update_from_output` before the

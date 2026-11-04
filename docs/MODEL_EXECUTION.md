@@ -174,7 +174,9 @@ reaches it anyway.
    `[B, 1, V]`, for sampling, or consumes device-sampled IDs `[B, 1]`.
    For `output_tokens_per_step > 1`, the adapter returns
    `[B, output_tokens_per_step]`; adaptive block
-   execution also permits one-token prefill and batched decode outputs.
+   execution also permits one-token prefill and batched decode outputs. With
+   `tt_adaptive_block_batched`, a batched decode step returns
+   `[B, output_tokens_per_step]` too: a full block for every row.
 
 Here `S` is the returned sequence dimension; the front-packed sampler uses
 only position `S - 1`. Lane-DP host extraction also accepts `[B, V]` logits.

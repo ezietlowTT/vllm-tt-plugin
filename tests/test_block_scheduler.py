@@ -36,6 +36,8 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
 from vllm_tt_plugin.config import (
     resolve_tt_supports_stage_outputs,
+    store_tt_adaptive_block_batched,
+    store_tt_adaptive_block_max_prompt_tokens,
     store_tt_adaptive_block_output,
     store_tt_block_kv_extent_tokens,
     store_tt_output_tokens_per_step,
@@ -95,6 +97,8 @@ def _scheduler(
     max_num_seqs: int = 1,
     kv_extent: int = 0,
     stage_outputs: bool = False,
+    batched: bool = False,
+    max_prompt: int = 0,
 ) -> TTScheduler:
     model_config = ModelConfig(
         model=str(LOCAL_MODEL_CONFIG),
@@ -142,6 +146,10 @@ def _scheduler(
         )
     if adaptive:
         store_tt_adaptive_block_output(config, True)
+    if batched:
+        store_tt_adaptive_block_batched(config, True)
+    if max_prompt:
+        store_tt_adaptive_block_max_prompt_tokens(config, max_prompt)
     if kv_extent:
         store_tt_block_kv_extent_tokens(config, kv_extent)
     num_blocks = max_model_len // BLOCK_SIZE + 2

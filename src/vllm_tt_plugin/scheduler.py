@@ -22,6 +22,7 @@ from vllm_tt_plugin.config import (
     get_tt_output_tokens_per_step,
     get_tt_prefill_chunk_alignment,
     get_tt_spec_plan,
+    is_tt_adaptive_block_batched,
     is_tt_adaptive_block_output_model,
     is_tt_block_output_model,
     tt_requests_cannot_resume,
@@ -384,6 +385,9 @@ class TTScheduler(AsyncScheduler):
         # Adaptive: emit the block only on a solo decode step; batch >1 decodes
         # as plain baseline. Lets max_num_seqs>1 coexist with block-output.
         self._is_adaptive_block = is_tt_adaptive_block_output_model(self.vllm_config)
+        # Batched adaptive: one speculative session per request, so a decode
+        # step is a block step for every request in it, not only a solo one.
+        self._adaptive_block_batched = is_tt_adaptive_block_batched(self.vllm_config)
         # Prompt-length frontier for the block path (0 = none): a longer prompt
         # is served as plain baseline by the model for its whole lifetime, so
         # its steps reserve width-1 even when solo.
@@ -1087,8 +1091,8 @@ class TTScheduler(AsyncScheduler):
         # This MUST match the model's own gate, which runs the spec block in
         # decode_forward when batch == 1 and a plain token otherwise:
         #   - solo == batch 1 (exactly one request scheduled this step);
-        #   - decode == the prompt was fully computed BEFORE this step (see the
-        #     decode test below, which subtracts this step's scheduled tokens).
+        #   - decode == the prompt was fully computed BEFORE this step (see
+        #     is_decode below, which subtracts this step's scheduled tokens).
         # The decision is attached to THIS step's SchedulerOutput (not a Request
         # slot): under async the next step's schedule() overwrites Request state
         # before this step's output commits, but the engine core hands the
@@ -1098,23 +1102,48 @@ class TTScheduler(AsyncScheduler):
         if self._is_adaptive_block:
             self._mirror_spec_session(scheduler_output, solo)
         decisions: dict[str, bool] = {}
-        for req_id in scheduler_output.num_scheduled_tokens:
+        scheduled_tokens = scheduler_output.num_scheduled_tokens
+
+        def is_decode(request: Request) -> bool:
+            # num_computed_tokens is already advanced by THIS step's scheduled
+            # tokens here, so subtract them back out: a step is a decode iff
+            # the prompt was fully computed BEFORE it. This is a pure
+            # scheduling-side quantity -- output-commit timing (which differs
+            # between sync tests and the pipelined engine loop) cannot skew
+            # it. A resumed replay scheduling prompt+output tokens lands back
+            # below the prompt boundary and correctly stays a non-block step.
+            scheduled = scheduled_tokens[request.request_id]
+            return request.num_computed_tokens - scheduled >= request.num_prompt_tokens
+
+        if self._is_adaptive_block and self._adaptive_block_batched:
+            # One per-step width cannot describe a step whose requests are
+            # partly anchors (width 1) and partly blocks; TTScheduler's modes
+            # schedule prefill and decode in separate steps, so refuse the mix
+            # rather than misaccount it.
+            kinds = [
+                is_decode(self.requests[req_id])
+                for req_id in scheduled_tokens
+                if not self.requests[req_id].is_prefill_chunk
+            ]
+            if any(kinds) and not all(kinds):
+                raise RuntimeError(
+                    "tt_adaptive_block_batched: a step mixes prefill and decode "
+                    f"requests ({sum(kinds)} decode of {len(kinds)}); the batched "
+                    "block contract needs decode-only steps"
+                )
+        for req_id in scheduled_tokens:
             request = self.requests[req_id]
             if request.is_prefill_chunk:
                 continue
-            if self._is_adaptive_block:
-                # num_computed_tokens is already advanced by THIS step's
-                # scheduled tokens here, so subtract them back out: a step is a
-                # decode iff the prompt was fully computed BEFORE it. This is a
-                # pure scheduling-side quantity -- output-commit timing (which
-                # differs between sync tests and the pipelined engine loop)
-                # cannot skew it. A resumed replay scheduling prompt+output
-                # tokens lands back below the prompt boundary and correctly
-                # stays a non-block step.
-                scheduled = scheduler_output.num_scheduled_tokens[req_id]
-                is_decode = (
-                    request.num_computed_tokens - scheduled >= request.num_prompt_tokens
+            if self._is_adaptive_block and self._adaptive_block_batched:
+                # Every request owns its own session, so every decode blocks.
+                # The model arms a session at the request's own prefill, which
+                # measures its prompt; a block-output request cannot resume
+                # (tt_requests_cannot_resume), so that measure never changes.
+                block_step = is_decode(request) and self._spec_frontier_ok(
+                    request.num_prompt_tokens
                 )
+            elif self._is_adaptive_block:
                 # Owning the model's single spec session is the whole gate:
                 # the model serves a solo decode as plain baseline whenever it
                 # has no session for THAT request, so reserving a block for a
@@ -1125,7 +1154,9 @@ class TTScheduler(AsyncScheduler):
                 # and re-deriving it from the request's CURRENT length would
                 # flip a live session's reservation to width 1 mid-generation
                 # while the model keeps emitting blocks.
-                block_step = solo and is_decode and self._spec_session_owner == req_id
+                block_step = (
+                    solo and is_decode(request) and self._spec_session_owner == req_id
+                )
             else:
                 block_step = True
             if block_step:

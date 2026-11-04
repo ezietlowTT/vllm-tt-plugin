@@ -215,6 +215,48 @@ def store_tt_adaptive_block_output(vllm_config: "VllmConfig", flag: bool) -> Non
     additional[_ADAPTIVE_BLOCK_OUTPUT_KEY] = bool(flag)
 
 
+def _read_tt_internal_flag(vllm_config: "VllmConfig", key: str) -> bool:
+    additional = getattr(vllm_config, "additional_config", None) or {}
+    return bool(additional.get(key, False))
+
+
+def _store_tt_internal_flag(vllm_config: "VllmConfig", key: str, flag: bool) -> None:
+    additional = getattr(vllm_config, "additional_config", None)
+    if not isinstance(additional, dict):
+        additional = {}
+        vllm_config.additional_config = additional
+    additional[key] = bool(flag)
+
+
+# Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
+_ADAPTIVE_BLOCK_BATCHED_KEY = "_tt_adaptive_block_batched"
+
+
+def is_tt_adaptive_block_batched(vllm_config: "VllmConfig") -> bool:
+    """Whether an adaptive block model commits a block on BATCHED decodes too.
+
+    A plain adaptive block model blocks only on a solo decode that owns its
+    single speculative session. A model that runs one speculative session per
+    request (one multi-request verify per step) declares
+    ``tt_adaptive_block_batched``: every decode step is a block step for every
+    request in it whose prompt is within ``tt_adaptive_block_max_prompt_tokens``,
+    each committing ``output_tokens_per_step`` tokens. Prefill steps still
+    commit one host-sampled anchor per request. ``TTScheduler`` raises on a
+    step that mixes prefill and decode requests, which its scheduling modes
+    never build.
+    """
+    return _read_tt_internal_flag(vllm_config, _ADAPTIVE_BLOCK_BATCHED_KEY)
+
+
+def store_tt_adaptive_block_batched(vllm_config: "VllmConfig", flag: bool) -> None:
+    """Record the model's ``tt_adaptive_block_batched`` capability.
+
+    Internal platform-to-runtime handoff, validated by
+    ``TTPlatform.check_and_update_config`` against ``tt_adaptive_block_output``.
+    """
+    _store_tt_internal_flag(vllm_config, _ADAPTIVE_BLOCK_BATCHED_KEY, flag)
+
+
 # Platform-derived; see _ADAPTIVE_BLOCK_OUTPUT_KEY.
 _ADAPTIVE_BLOCK_MAX_PROMPT_KEY = "_tt_adaptive_block_max_prompt_tokens"
 
